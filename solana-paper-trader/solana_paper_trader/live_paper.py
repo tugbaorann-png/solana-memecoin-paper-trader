@@ -71,12 +71,18 @@ class LivePaperLedger:
         self,
         config: LivePaperConfig | None = None,
         state_path: str | Path | None = None,
+        *,
+        persistence_path: str | Path | None = None,
     ) -> None:
         self.config = config or LivePaperConfig()
         if self.config.notional_usd <= 0:
             raise ValueError("notional_usd must be positive")
+        if state_path is not None and persistence_path is not None:
+            raise ValueError("provide only one of state_path or persistence_path")
         self.positions: dict[str, LivePaperPosition] = {}
-        self.state_path = Path(state_path) if state_path else None
+        selected_path = state_path if state_path is not None else persistence_path
+        self.state_path = Path(selected_path) if selected_path else None
+        self.persistence_path = self.state_path
         if self.state_path:
             self._load()
 

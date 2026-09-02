@@ -71,6 +71,8 @@ def _add_live_arguments(parser: argparse.ArgumentParser, *, cycles_default: int)
     parser.add_argument("--stop-loss", type=float, default=-10)
     parser.add_argument(
         "--state-file",
+        "--ledger-path",
+        dest="state_file",
         default=".paper_trader/live_paper_ledger.json",
         help="Local JSON file used to persist virtual open and closed positions.",
     )
@@ -138,7 +140,11 @@ def _run_live_scan(args: argparse.Namespace) -> int:
                 take_profit_pct=args.take_profit,
                 stop_loss_pct=args.stop_loss,
             ),
-            state_path=args.state_file,
+            state_path=getattr(
+                args,
+                "state_file",
+                getattr(args, "ledger_path", ".paper_trader/live_paper_ledger.json"),
+            ),
         )
     except PaperLedgerPersistenceError as error:
         raise SystemExit(str(error)) from error

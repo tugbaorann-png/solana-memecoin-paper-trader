@@ -180,6 +180,52 @@ class PaperTradingTests(unittest.TestCase):
             with self.assertRaises(PaperLedgerPersistenceError):
                 LivePaperLedger(state_path=state_path)
 
+    def test_paper_ledger_resumes_open_position_by_mint_without_credentials(self) -> None:
+        from datetime import datetime, timezone
+
+        first = TokenSnapshot(
+            observed_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            symbol="GOOD",
+            mint="GoodMint",
+            price_usd=2,
+            liquidity_usd=100_000,
+            market_cap_usd=500_000,
+            token_age_minutes=60,
+            volume_5m_usd=2_000,
+            volume_1h_usd=10_000,
+            price_change_5m_pct=5,
+            buys_5m=8,
+            sells_5m=2,
+            pair_address="Pair",
+            dex_id="raydium",
+            source_url="https://dexscreener.com/solana/Pair",
+        )
+        later = TokenSnapshot(
+            **{
+                **first.__dict__,
+                "observed_at": datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc),
+                "price_usd": 2.2,
+            }
+        )
+
+        with TemporaryDirectory() as directory:
+            state_path = Path(directory) / "ledger.json"
+            scan = TokenScan(first, True, (), 10, 5, 12)
+            later_scan = TokenScan(later, True, (), 10, 5, 12)
+            LivePaperLedger(persistence_path=state_path).update([scan])
+            resumed = LivePaperLedger(
+                LivePaperConfig(take_profit_pct=50),
+                persistence_path=state_path,
+            ).update([later_scan])[0]
+
+            self.assertEqual(resumed.mint, "GoodMint")
+            self.assertEqual(resumed.entry_price_usd, 2)
+            self.assertAlmostEqual(resumed.current_value_usd, 11)
+            self.assertAlmostEqual(resumed.pnl_pct, 10)
+            saved = state_path.read_text(encoding="utf-8")
+            self.assertNotIn("private_key", saved)
+            self.assertNotIn("HELIUS_API_KEY", saved)
+
 
 if __name__ == "__main__":
     unittest.main()

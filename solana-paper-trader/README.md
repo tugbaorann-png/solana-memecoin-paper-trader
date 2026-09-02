@@ -84,9 +84,11 @@ If Dexscreener temporarily rate-limits a request, `paper-loop` backs off and
 retries instead of ending the paper-trading session.
 
 The scanner and continuous loop persist their virtual open and closed positions to
-`.paper_trader/live_paper_ledger.json` by default. Use `--state-file` to choose a
-different local JSON path. State writes use an atomic replace, and invalid state
-fails clearly instead of silently erasing history.
+`.paper_trader/live_paper_ledger.json` by default. Use `--state-file` (or the
+backward-compatible `--ledger-path`) to choose a different local JSON path. State
+writes use an atomic replace, and invalid state fails clearly instead of silently
+erasing history. The ledger contains only paper-position data; it never stores
+wallet keys, API keys, or other credentials.
 
 `scan-live` never uses `HELIUS_API_KEY`; Helius remains limited to the separate
 read-only health check.
