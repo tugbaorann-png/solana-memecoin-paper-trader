@@ -9,7 +9,8 @@ This project:
 - never connects to a Solana wallet;
 - never asks for, reads, or stores private keys or seed phrases;
 - never imports a Solana transaction or trading SDK;
-- never sends orders to a DEX, RPC endpoint, exchange, or broker;
+- never sends orders or transactions to a DEX, exchange, or broker;
+- uses Helius only for a read-only mainnet block-height health check;
 - uses deterministic synthetic prices for demos and local CSV files for backtests.
 
 It is a strategy research tool, not financial advice and not a live trading bot.
@@ -28,6 +29,16 @@ python -m solana_paper_trader backtest data/sample_market.csv \
   --starting-cash 10000 \
   --position-size 250
 ```
+
+Check the read-only Helius mainnet connection. The `HELIUS_API_KEY` environment
+secret must be configured first:
+
+```bash
+python -m solana_paper_trader check-helius
+```
+
+This calls Solana JSON-RPC `getBlockHeight` through Helius and prints only the
+returned block height. It does not enable live market data or live execution.
 
 Install it as a local command if desired:
 
@@ -59,4 +70,5 @@ The included strategy is intentionally simple and transparent:
 - charges a configurable simulated fee in basis points.
 
 All assumptions are in `solana_paper_trader/strategy.py` and can be changed without
-adding a live-trading path.
+adding a live-trading path. The Helius client in `solana_paper_trader/helius.py`
+is intentionally limited to the block-height health check.

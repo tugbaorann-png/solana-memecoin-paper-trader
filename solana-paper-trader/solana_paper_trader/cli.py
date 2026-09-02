@@ -5,6 +5,7 @@ import json
 from collections.abc import Sequence
 
 from .engine import PaperTradingEngine
+from .helius import HeliusReadOnlyClient
 from .market import SyntheticMarket, read_csv_ticks
 from .strategy import MomentumStrategy, StrategyConfig
 
@@ -28,6 +29,11 @@ def _parser() -> argparse.ArgumentParser:
     backtest.add_argument("--starting-cash", type=float, default=10_000)
     backtest.add_argument("--position-size", type=float, default=250)
     backtest.add_argument("--json", action="store_true", help="Print machine-readable output.")
+
+    subparsers.add_parser(
+        "check-helius",
+        help="Read the latest confirmed Solana mainnet block height through Helius.",
+    )
     return parser
 
 
@@ -91,6 +97,11 @@ def _trade_json(trade) -> dict[str, str | float]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "check-helius":
+        block_height = HeliusReadOnlyClient.from_environment().get_latest_block_height()
+        print(f"Helius mainnet connection OK — latest confirmed block height: {block_height}")
+        print("Read-only health check; paper-trading mode remains enabled.")
+        return 0
     if args.command == "run-demo" and args.steps <= 0:
         raise SystemExit("--steps must be positive")
     if args.starting_cash <= 0 or args.position_size <= 0:

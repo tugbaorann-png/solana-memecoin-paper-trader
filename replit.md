@@ -7,6 +7,7 @@ An offline Python simulator for testing Solana memecoin strategy ideas with virt
 - `cd solana-paper-trader && python -m solana_paper_trader run-demo` — run the deterministic paper-trading demo
 - `cd solana-paper-trader && python -m unittest discover -s tests` — run the Python safety and behavior tests
 - `cd solana-paper-trader && python -m solana_paper_trader backtest data/sample_market.csv` — backtest a local CSV
+- `cd solana-paper-trader && python -m solana_paper_trader check-helius` — perform the read-only Helius block-height health check
 
 - `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
 - `pnpm run typecheck` — full typecheck across all packages
@@ -33,6 +34,7 @@ An offline Python simulator for testing Solana memecoin strategy ideas with virt
 ## Architecture decisions
 
 - Market input is intentionally limited to deterministic synthetic data and local CSV files.
+- Helius is used only for a read-only `getBlockHeight` health check via `HELIUS_API_KEY`.
 - The execution engine only creates virtual fills in an in-memory portfolio; it has no wallet or transaction abstraction.
 - Strategy controls are explicit dataclass fields so backtests are reproducible and easy to audit.
 
