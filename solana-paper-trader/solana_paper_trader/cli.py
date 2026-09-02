@@ -121,7 +121,7 @@ def _print_result(
 
 
 def _run_live_scan(args: argparse.Namespace) -> int:
-    continuous = args.command == "paper-loop"
+    continuous = args.command == "paper-loop" and args.cycles == 0
     if args.limit <= 0 or args.cycles < 0 or (not continuous and args.cycles == 0):
         raise SystemExit("--limit must be positive; --cycles must be positive for scan-live")
     if args.interval_seconds < 0:
