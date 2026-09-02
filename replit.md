@@ -9,6 +9,7 @@ An offline Python simulator for testing Solana memecoin strategy ideas with virt
 - `cd solana-paper-trader && python -m solana_paper_trader backtest data/sample_market.csv` — backtest a local CSV
 - `cd solana-paper-trader && python -m solana_paper_trader check-helius` — perform the read-only Helius block-height health check
 - `cd solana-paper-trader && python -m solana_paper_trader scan-live --limit 20` — scan public Solana market data and create virtual $10 paper entries
+- `cd solana-paper-trader && python -m solana_paper_trader paper-loop --interval-seconds 60` — continuously scan and manage virtual positions until Ctrl+C
 
 - `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
 - `pnpm run typecheck` — full typecheck across all packages

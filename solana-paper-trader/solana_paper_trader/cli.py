@@ -46,19 +46,35 @@ def _parser() -> argparse.ArgumentParser:
         "scan-live",
         help="Discover and monitor Solana tokens with public read-only market data.",
     )
-    scanner.add_argument("--limit", type=int, default=20)
-    scanner.add_argument("--cycles", type=int, default=1)
-    scanner.add_argument("--interval-seconds", type=float, default=60)
-    scanner.add_argument("--min-liquidity", type=float, default=25_000)
-    scanner.add_argument("--take-profit", type=float, default=20)
-    scanner.add_argument("--stop-loss", type=float, default=-10)
-    scanner.add_argument(
+    _add_live_arguments(scanner, cycles_default=1)
+
+    loop = subparsers.add_parser(
+        "paper-loop",
+        help="Continuously scan and manage virtual paper positions until interrupted.",
+    )
+    _add_live_arguments(loop, cycles_default=0)
+    return parser
+
+
+def _add_live_arguments(parser: argparse.ArgumentParser, *, cycles_default: int) -> None:
+    """Add the shared scanner options to one-shot and continuous commands."""
+    parser.add_argument("--limit", type=int, default=20)
+    parser.add_argument(
+        "--cycles",
+        type=int,
+        default=cycles_default,
+        help="Number of cycles; 0 means continuous for paper-loop.",
+    )
+    parser.add_argument("--interval-seconds", type=float, default=60)
+    parser.add_argument("--min-liquidity", type=float, default=25_000)
+    parser.add_argument("--take-profit", type=float, default=20)
+    parser.add_argument("--stop-loss", type=float, default=-10)
+    parser.add_argument(
         "--state-file",
         default=".paper_trader/live_paper_ledger.json",
         help="Local JSON file used to persist virtual open and closed positions.",
     )
-    scanner.add_argument("--json", action="store_true", help="Print machine-readable output.")
-    return parser
+    parser.add_argument("--json", action="store_true", help="Print machine-readable output.")
 
 
 def _run_engine(args: argparse.Namespace) -> PaperTradingEngine:
@@ -105,8 +121,9 @@ def _print_result(
 
 
 def _run_live_scan(args: argparse.Namespace) -> int:
-    if args.limit <= 0 or args.cycles <= 0:
-        raise SystemExit("--limit and --cycles must be positive")
+    continuous = args.command == "paper-loop"
+    if args.limit <= 0 or args.cycles < 0 or (not continuous and args.cycles == 0):
+        raise SystemExit("--limit must be positive; --cycles must be positive for scan-live")
     if args.interval_seconds < 0:
         raise SystemExit("--interval-seconds cannot be negative")
     if args.take_profit <= 0 or args.stop_loss >= 0:
@@ -125,27 +142,39 @@ def _run_live_scan(args: argparse.Namespace) -> int:
         )
     except PaperLedgerPersistenceError as error:
         raise SystemExit(str(error)) from error
-    latest_scan = None
-    for cycle in range(args.cycles):
-        try:
-            latest_scan = scanner.scan(limit=args.limit, config=scan_config)
-        except MarketDataError as error:
-            raise SystemExit(str(error)) from error
-        try:
+    cycle = 0
+    try:
+        while continuous or cycle < args.cycles:
+            try:
+                latest_scan = scanner.scan(limit=args.limit, config=scan_config)
+            except MarketDataError as error:
+                if continuous and error.retryable:
+                    if not args.json:
+                        print(f"\n{error} Waiting {error.retry_after_seconds:.0f}s.")
+                    time.sleep(error.retry_after_seconds)
+                    continue
+                raise
+            cycle += 1
             paper_positions = ledger.update(list(latest_scan.scanned))
-        except PaperLedgerPersistenceError as error:
-            raise SystemExit(str(error)) from error
-        if args.json:
-            print(
-                json.dumps(
-                    _live_scan_json(latest_scan, paper_positions, cycle + 1),
-                    indent=2,
+            if args.json:
+                print(
+                    json.dumps(
+                        _live_scan_json(latest_scan, paper_positions, cycle),
+                        indent=2,
+                    ),
+                    flush=True,
                 )
-            )
-        else:
-            _print_live_scan(latest_scan, paper_positions, cycle + 1)
-        if cycle < args.cycles - 1:
-            time.sleep(args.interval_seconds)
+            else:
+                _print_live_scan(latest_scan, paper_positions, cycle)
+            if continuous or cycle < args.cycles:
+                time.sleep(args.interval_seconds)
+    except MarketDataError as error:
+        raise SystemExit(str(error)) from error
+    except PaperLedgerPersistenceError as error:
+        raise SystemExit(str(error)) from error
+    except KeyboardInterrupt:
+        if not args.json:
+            print("\nPaper loop stopped. Virtual position history remains saved.")
     return 0
 
 
@@ -160,6 +189,7 @@ def _live_scan_json(scan, positions, cycle: int) -> dict:
         "ranked_tokens": [item.to_dict() for item in scan.eligible],
         "rejected_tokens": [item.to_dict() for item in scan.rejected],
         "paper_trades": [position.to_dict() for position in positions],
+        "paper_summary": _paper_summary(positions),
     }
 
 
@@ -197,6 +227,25 @@ def _print_live_scan(scan, positions, cycle: int) -> None:
             f" | P/L {position.pnl_pct:+.2f}%"
             f" | {position.status}"
         )
+    summary = _paper_summary(positions)
+    print(
+        f"  Virtual P/L: ${summary['total_pnl_usd']:+.2f}"
+        f" | open value: ${summary['open_value_usd']:.2f}"
+        f" | open positions: {summary['open_positions']}"
+    )
+
+
+def _paper_summary(positions) -> dict[str, float | int]:
+    return {
+        "open_positions": sum(position.status == "OPEN" for position in positions),
+        "closed_positions": sum(position.status != "OPEN" for position in positions),
+        "open_value_usd": sum(
+            position.current_value_usd
+            for position in positions
+            if position.status == "OPEN"
+        ),
+        "total_pnl_usd": sum(position.pnl_usd for position in positions),
+    }
 
 
 def _trade_json(trade) -> dict[str, str | float]:
@@ -216,7 +265,7 @@ def _trade_json(trade) -> dict[str, str | float]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if args.command == "scan-live":
+    if args.command in {"scan-live", "paper-loop"}:
         return _run_live_scan(args)
     if args.command == "check-helius":
         block_height = HeliusReadOnlyClient.from_environment().get_latest_block_height()

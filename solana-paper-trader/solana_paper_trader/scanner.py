@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -12,6 +13,17 @@ from urllib.request import Request, urlopen
 
 class MarketDataError(RuntimeError):
     """Raised when the public market-data provider cannot be read."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = False,
+        retry_after_seconds: float = 0,
+    ) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        self.retry_after_seconds = retry_after_seconds
 
 
 @dataclass(frozen=True)
@@ -192,6 +204,13 @@ class DexscreenerClient:
             with urlopen(request, timeout=self.timeout_seconds) as response:
                 return json.loads(response.read().decode("utf-8"))
         except HTTPError as error:
+            if error.code == 429:
+                retry_after = _number(error.headers.get("Retry-After"))
+                raise MarketDataError(
+                    "Dexscreener rate limit reached; the paper loop will back off and retry.",
+                    retryable=True,
+                    retry_after_seconds=max(retry_after, 1),
+                ) from error
             raise MarketDataError(f"Dexscreener returned HTTP {error.code}.") from error
         except (URLError, TimeoutError, OSError, json.JSONDecodeError) as error:
             raise MarketDataError("Unable to read Dexscreener public market data.") from error

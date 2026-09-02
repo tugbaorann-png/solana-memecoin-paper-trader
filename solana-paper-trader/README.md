@@ -47,6 +47,20 @@ Scan and monitor live Solana token markets:
 python -m solana_paper_trader scan-live --limit 20 --cycles 1
 ```
 
+Run the continuous paper-trading loop. It keeps scanning until you stop it with
+Ctrl+C:
+
+```bash
+python -m solana_paper_trader paper-loop \
+  --limit 20 \
+  --interval-seconds 60
+```
+
+For a bounded smoke run, pass `--cycles 2`. Every cycle reuses the existing
+filters and ranking strategy, opens only virtual positions for newly eligible
+tokens, marks existing positions to current public prices, evaluates their
+take-profit/stop-loss thresholds, and saves the ledger.
+
 The scanner discovers recent Solana token profiles from Dexscreener, selects the
 highest-liquidity pair for each token, and collects price, liquidity, market cap,
 token age, 5-minute and 1-hour volume, 5-minute price change, and 5-minute buys
@@ -66,7 +80,10 @@ python -m solana_paper_trader scan-live \
   --json
 ```
 
-The scanner persists its virtual open and closed positions to
+If Dexscreener temporarily rate-limits a request, `paper-loop` backs off and
+retries instead of ending the paper-trading session.
+
+The scanner and continuous loop persist their virtual open and closed positions to
 `.paper_trader/live_paper_ledger.json` by default. Use `--state-file` to choose a
 different local JSON path. State writes use an atomic replace, and invalid state
 fails clearly instead of silently erasing history.
