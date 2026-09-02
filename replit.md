@@ -1,8 +1,12 @@
-# [Project name]
+# Solana Memecoin Paper Trader
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+An offline Python simulator for testing Solana memecoin strategy ideas with virtual money only.
 
 ## Run & Operate
+
+- `cd solana-paper-trader && python -m solana_paper_trader run-demo` — run the deterministic paper-trading demo
+- `cd solana-paper-trader && python -m unittest discover -s tests` — run the Python safety and behavior tests
+- `cd solana-paper-trader && python -m solana_paper_trader backtest data/sample_market.csv` — backtest a local CSV
 
 - `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
 - `pnpm run typecheck` — full typecheck across all packages
@@ -22,23 +26,29 @@ _Replace the heading above with the project's name, and this line with one sente
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `solana-paper-trader/solana_paper_trader/` — simulator models, strategy, market feeds, engine, and CLI
+- `solana-paper-trader/data/sample_market.csv` — local backtest fixture
+- `solana-paper-trader/tests/` — behavior and safety-boundary tests
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Market input is intentionally limited to deterministic synthetic data and local CSV files.
+- The execution engine only creates virtual fills in an in-memory portfolio; it has no wallet or transaction abstraction.
+- Strategy controls are explicit dataclass fields so backtests are reproducible and easy to audit.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+- Run a deterministic demo with virtual cash.
+- Backtest against local market observations.
+- Review every simulated fill, fee, exit reason, and realized P&L.
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- Never execute real trades or request wallet private keys.
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- This is a paper-trading simulator only; do not add live wallet or order-routing dependencies without an explicit product change.
 
 ## Pointers
 

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "solana-memecoin-paper-trader"
+version = "0.1.0"
+description = "A safe, offline paper-trading simulator for Solana memecoin strategies."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Replit Agent" }]
+dependencies = []
+
+[project.scripts]
+paper-trader = "solana_paper_trader.cli:main"
+
+[tool.setuptools]
+packages = ["solana_paper_trader"]
