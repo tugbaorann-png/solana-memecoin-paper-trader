@@ -11,6 +11,7 @@ This project:
 - never imports a Solana transaction or trading SDK;
 - never sends orders or transactions to a DEX, exchange, or broker;
 - uses Helius only for a read-only mainnet block-height health check;
+- uses Dexscreener only for public read-only market data;
 - uses deterministic synthetic prices for demos and local CSV files for backtests.
 
 It is a strategy research tool, not financial advice and not a live trading bot.
@@ -39,6 +40,34 @@ python -m solana_paper_trader check-helius
 
 This calls Solana JSON-RPC `getBlockHeight` through Helius and prints only the
 returned block height. It does not enable live market data or live execution.
+
+Scan and monitor live Solana token markets:
+
+```bash
+python -m solana_paper_trader scan-live --limit 20 --cycles 1
+```
+
+The scanner discovers recent Solana token profiles from Dexscreener, selects the
+highest-liquidity pair for each token, and collects price, liquidity, market cap,
+token age, 5-minute and 1-hour volume, 5-minute price change, and 5-minute buys
+and sells. It rejects low-liquidity, too-new, inactive, extreme-move, and
+volume/liquidity-outlier tokens before ranking survivors by momentum and liquidity.
+
+Every token that passes filters gets a virtual $10 paper entry. With multiple
+cycles, the ledger marks each position as `TAKE_PROFIT` or `STOP_LOSS` when its
+simulated P/L reaches the configured thresholds:
+
+```bash
+python -m solana_paper_trader scan-live \
+  --cycles 5 \
+  --interval-seconds 60 \
+  --take-profit 20 \
+  --stop-loss -10 \
+  --json
+```
+
+`scan-live` never uses `HELIUS_API_KEY`; Helius remains limited to the separate
+read-only health check.
 
 Install it as a local command if desired:
 

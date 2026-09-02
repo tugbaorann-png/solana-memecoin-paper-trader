@@ -3,7 +3,14 @@ from unittest.mock import patch
 
 from solana_paper_trader.engine import PaperTradingEngine
 from solana_paper_trader.helius import HeliusReadOnlyClient
+from solana_paper_trader.live_paper import LivePaperConfig, LivePaperLedger
 from solana_paper_trader.market import SyntheticMarket
+from solana_paper_trader.scanner import (
+    ScannerConfig,
+    TokenScan,
+    TokenSnapshot,
+    _filter_reasons,
+)
 from solana_paper_trader.strategy import MomentumStrategy, StrategyConfig
 
 
@@ -54,6 +61,66 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(request.method, "POST")
         self.assertIn("getBlockHeight", request.data.decode("utf-8"))
         self.assertNotIn("sendTransaction", request.data.decode("utf-8"))
+
+    def test_scanner_rejects_low_liquidity_and_suspicious_activity(self) -> None:
+        snapshot = TokenSnapshot(
+            observed_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+            symbol="RISK",
+            mint="RiskMint",
+            price_usd=1,
+            liquidity_usd=100,
+            market_cap_usd=1_000_000,
+            token_age_minutes=1,
+            volume_5m_usd=100_000,
+            volume_1h_usd=200_000,
+            price_change_5m_pct=400,
+            buys_5m=0,
+            sells_5m=1,
+            pair_address="Pair",
+            dex_id="raydium",
+            source_url="https://dexscreener.com/solana/Pair",
+        )
+        reasons = _filter_reasons(snapshot, ScannerConfig())
+        self.assertIn("low_liquidity", reasons)
+        self.assertIn("token_too_new", reasons)
+        self.assertIn("extreme_5m_price_change", reasons)
+        self.assertIn("no_recent_buys", reasons)
+        self.assertIn("suspicious_volume_to_liquidity", reasons)
+
+    def test_paper_ledger_records_entry_and_stop_loss(self) -> None:
+        from datetime import datetime, timezone
+
+        first = TokenSnapshot(
+            observed_at=datetime.now(timezone.utc),
+            symbol="GOOD",
+            mint="GoodMint",
+            price_usd=2,
+            liquidity_usd=100_000,
+            market_cap_usd=500_000,
+            token_age_minutes=60,
+            volume_5m_usd=2_000,
+            volume_1h_usd=10_000,
+            price_change_5m_pct=5,
+            buys_5m=8,
+            sells_5m=2,
+            pair_address="Pair",
+            dex_id="raydium",
+            source_url="https://dexscreener.com/solana/Pair",
+        )
+        second = TokenSnapshot(
+            **{**first.__dict__, "observed_at": datetime.now(timezone.utc), "price_usd": 1.7}
+        )
+        eligible = TokenScan(first, True, (), 10, 5, 12)
+        update = TokenScan(second, True, (), 10, 5, 12)
+        ledger = LivePaperLedger(LivePaperConfig(stop_loss_pct=-10))
+
+        opened = ledger.update([eligible])[0]
+        closed = ledger.update([update])[0]
+
+        self.assertEqual(opened.entry_value_usd, 10)
+        self.assertAlmostEqual(opened.quantity, 5)
+        self.assertEqual(closed.status, "STOP_LOSS")
+        self.assertAlmostEqual(closed.pnl_pct, -15)
 
 
 if __name__ == "__main__":
