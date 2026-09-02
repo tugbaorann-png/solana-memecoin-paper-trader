@@ -29,6 +29,7 @@ node_modules
 
 # misc
 /.sass-cache
+/.paper_trader/
 /connect.lock
 /paper_ledger.json
 /coverage
