@@ -1,9 +1,15 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from solana_paper_trader.engine import PaperTradingEngine
 from solana_paper_trader.helius import HeliusReadOnlyClient
-from solana_paper_trader.live_paper import LivePaperConfig, LivePaperLedger
+from solana_paper_trader.live_paper import (
+    LivePaperConfig,
+    LivePaperLedger,
+    PaperLedgerPersistenceError,
+)
 from solana_paper_trader.market import SyntheticMarket
 from solana_paper_trader.scanner import (
     ScannerConfig,
@@ -121,6 +127,58 @@ class PaperTradingTests(unittest.TestCase):
         self.assertAlmostEqual(opened.quantity, 5)
         self.assertEqual(closed.status, "STOP_LOSS")
         self.assertAlmostEqual(closed.pnl_pct, -15)
+
+    def test_paper_ledger_restores_open_and_closed_positions(self) -> None:
+        from datetime import datetime, timezone
+
+        first = TokenSnapshot(
+            observed_at=datetime.now(timezone.utc),
+            symbol="PERSIST",
+            mint="PersistMint",
+            price_usd=2,
+            liquidity_usd=100_000,
+            market_cap_usd=500_000,
+            token_age_minutes=60,
+            volume_5m_usd=2_000,
+            volume_1h_usd=10_000,
+            price_change_5m_pct=5,
+            buys_5m=8,
+            sells_5m=2,
+            pair_address="Pair",
+            dex_id="raydium",
+            source_url="https://dexscreener.com/solana/Pair",
+        )
+        later = TokenSnapshot(
+            **{**first.__dict__, "observed_at": datetime.now(timezone.utc), "price_usd": 1.7}
+        )
+        eligible = TokenScan(first, True, (), 10, 5, 12)
+        stop_loss = TokenScan(later, True, (), 10, 5, 12)
+
+        with TemporaryDirectory() as directory:
+            state_path = Path(directory) / "ledger.json"
+            original = LivePaperLedger(
+                LivePaperConfig(stop_loss_pct=-10),
+                state_path=state_path,
+            )
+            original.update([eligible])
+            restored = LivePaperLedger(
+                LivePaperConfig(stop_loss_pct=-10),
+                state_path=state_path,
+            )
+
+            self.assertEqual(restored.positions["PersistMint"].status, "OPEN")
+            restored.update([stop_loss])
+            closed = LivePaperLedger(state_path=state_path)
+
+            self.assertEqual(closed.positions["PersistMint"].status, "STOP_LOSS")
+            self.assertAlmostEqual(closed.positions["PersistMint"].pnl_pct, -15)
+
+    def test_invalid_paper_ledger_does_not_reset_history(self) -> None:
+        with TemporaryDirectory() as directory:
+            state_path = Path(directory) / "ledger.json"
+            state_path.write_text("{not valid json", encoding="utf-8")
+            with self.assertRaises(PaperLedgerPersistenceError):
+                LivePaperLedger(state_path=state_path)
 
 
 if __name__ == "__main__":

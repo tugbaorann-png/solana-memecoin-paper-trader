@@ -37,6 +37,7 @@ An offline Python simulator for testing Solana memecoin strategy ideas with virt
 - Market input is intentionally limited to deterministic synthetic data and local CSV files.
 - Helius is used only for a read-only `getBlockHeight` health check via `HELIUS_API_KEY`.
 - Dexscreener is used as a public, read-only market-data source for live scanning.
+- Live virtual positions persist to `.paper_trader/live_paper_ledger.json` by default; use `--state-file` for an alternate local file.
 - The execution engine only creates virtual fills in an in-memory portfolio; it has no wallet or transaction abstraction.
 - Strategy controls are explicit dataclass fields so backtests are reproducible and easy to audit.
 

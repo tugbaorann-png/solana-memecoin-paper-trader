@@ -7,7 +7,11 @@ from collections.abc import Sequence
 
 from .engine import PaperTradingEngine
 from .helius import HeliusReadOnlyClient
-from .live_paper import LivePaperConfig, LivePaperLedger
+from .live_paper import (
+    LivePaperConfig,
+    LivePaperLedger,
+    PaperLedgerPersistenceError,
+)
 from .market import SyntheticMarket, read_csv_ticks
 from .scanner import DexscreenerClient, MarketDataError, ScannerConfig
 from .strategy import MomentumStrategy, StrategyConfig
@@ -48,6 +52,11 @@ def _parser() -> argparse.ArgumentParser:
     scanner.add_argument("--min-liquidity", type=float, default=25_000)
     scanner.add_argument("--take-profit", type=float, default=20)
     scanner.add_argument("--stop-loss", type=float, default=-10)
+    scanner.add_argument(
+        "--state-file",
+        default=".paper_trader/live_paper_ledger.json",
+        help="Local JSON file used to persist virtual open and closed positions.",
+    )
     scanner.add_argument("--json", action="store_true", help="Print machine-readable output.")
     return parser
 
@@ -105,20 +114,27 @@ def _run_live_scan(args: argparse.Namespace) -> int:
 
     scanner = DexscreenerClient()
     scan_config = ScannerConfig(min_liquidity_usd=args.min_liquidity)
-    ledger = LivePaperLedger(
-        LivePaperConfig(
-            notional_usd=10,
-            take_profit_pct=args.take_profit,
-            stop_loss_pct=args.stop_loss,
+    try:
+        ledger = LivePaperLedger(
+            LivePaperConfig(
+                notional_usd=10,
+                take_profit_pct=args.take_profit,
+                stop_loss_pct=args.stop_loss,
+            ),
+            state_path=args.state_file,
         )
-    )
+    except PaperLedgerPersistenceError as error:
+        raise SystemExit(str(error)) from error
     latest_scan = None
     for cycle in range(args.cycles):
         try:
             latest_scan = scanner.scan(limit=args.limit, config=scan_config)
         except MarketDataError as error:
             raise SystemExit(str(error)) from error
-        paper_positions = ledger.update(list(latest_scan.scanned))
+        try:
+            paper_positions = ledger.update(list(latest_scan.scanned))
+        except PaperLedgerPersistenceError as error:
+            raise SystemExit(str(error)) from error
         if args.json:
             print(
                 json.dumps(

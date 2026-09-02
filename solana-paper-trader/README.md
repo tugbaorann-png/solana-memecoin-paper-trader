@@ -66,6 +66,11 @@ python -m solana_paper_trader scan-live \
   --json
 ```
 
+The scanner persists its virtual open and closed positions to
+`.paper_trader/live_paper_ledger.json` by default. Use `--state-file` to choose a
+different local JSON path. State writes use an atomic replace, and invalid state
+fails clearly instead of silently erasing history.
+
 `scan-live` never uses `HELIUS_API_KEY`; Helius remains limited to the separate
 read-only health check.
 
