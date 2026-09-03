@@ -213,11 +213,11 @@ class DexscreenerClient:
                 ) from error
             raise MarketDataError(f"Dexscreener returned HTTP {error.code}.") from error
         except (URLError, TimeoutError, OSError, json.JSONDecodeError) as error:
-    raise MarketDataError(
-        "Unable to read Dexscreener public market data.",
-        retryable=True,
-        retry_after_seconds=10,
-    ) from error
+                raise MarketDataError(
+                "Unable to read Dexscreener public market data.",
+                retryable=True,
+                retry_after_seconds=10,
+                        ) from error
 
 
 def _best_liquidity_pair(pairs: list[dict[str, Any]]) -> dict[str, Any] | None:
