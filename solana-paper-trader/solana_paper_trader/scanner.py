@@ -163,7 +163,7 @@ class DexscreenerClient:
         if not isinstance(pairs, list):
             return []
         return [pair for pair in pairs if isinstance(pair, dict)]
-   def token_snapshot (self, mint: str) -> dict[str, Any] | None:
+       def token_snapshot(self, mint: str) -> TokenSnapshot | None:
         pairs = self.token_pairs(mint)
         solana_pairs = [
             pair
@@ -171,7 +171,10 @@ class DexscreenerClient:
             if pair.get("chainId") == "solana"
             and str(pair.get("baseToken", {}).get("address", "")) == mint
         ]
-        return _best_liquidity_pair(solana_pairs)
+        pair = _best_liquidity_pair(solana_pairs)
+        if pair is None:
+            return None
+        return _snapshot_from_pair(pair, datetime.now(timezone.utc))
     def scan(self, limit: int = 20, config: ScannerConfig | None = None) -> LiveScanResult:
         scanner_config = config or ScannerConfig()
         observed_at = datetime.now(timezone.utc)
