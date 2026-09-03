@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "positions": [
+    {
+      "symbol": "RETARDIO",
+      "mint": "CSRRgTwf9o5KLgguS2M16aEAhV5PUUzfshrAAQ8opump",
+      "entry_price_usd": 0.0002926,
+      "quantity": 34176.34996582365,
+      "entry_value_usd": 10.0,
+      "current_price_usd": 0.0002921,
+      "current_value_usd": 9.982911825017087,
+      "pnl_usd": -0.017088174982912818,
+      "pnl_pct": -0.17088174982912818,
+      "take_profit_pct": 20.0,
+      "stop_loss_pct": -10.0,
+      "status": "OPEN",
+      "opened_at": "2026-09-02T22:37:57.071993+00:00",
+      "updated_at": "2026-09-02T23:01:57.533039+00:00",
+      "exit_price_usd": null,
+      "exit_reason": null
+    }
+  ]
+}
