@@ -163,7 +163,7 @@ class DexscreenerClient:
         if not isinstance(pairs, list):
             return []
         return [pair for pair in pairs if isinstance(pair, dict)]
-    def token_pair(self, mint: str) -> dict[str, Any] | None:
+   def token_snapshot (self, mint: str) -> dict[str, Any] | None:
         pairs = self.token_pairs(mint)
         solana_pairs = [
             pair
