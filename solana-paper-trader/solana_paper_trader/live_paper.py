@@ -98,6 +98,14 @@ class LivePaperLedger:
         self.save()
         return list(self.positions.values())
 
+        def update_open_positions(self, snapshots: list[TokenSnapshot]) -> None:
+        """Refresh every open position from independently fetched market snapshots."""
+        for snapshot in snapshots:
+            position = self.positions.get(snapshot.mint)
+            if position is not None and position.status == "OPEN":
+                self._mark(position, snapshot)
+        self.save()
+
     def save(self) -> None:
         """Persist open and closed virtual positions with an atomic file replace."""
         if self.state_path is None:
