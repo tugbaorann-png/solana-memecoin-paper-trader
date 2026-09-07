@@ -98,7 +98,7 @@ class LivePaperLedger:
         self.save()
         return list(self.positions.values())
 
-        def update_open_positions(self, snapshots: list[TokenSnapshot]) -> None:
+    def update_open_positions(self, snapshots: list[TokenSnapshot]) -> None:
         """Refresh every open position from independently fetched market snapshots."""
         for snapshot in snapshots:
             position = self.positions.get(snapshot.mint)
@@ -206,7 +206,6 @@ class LivePaperLedger:
             position.status = "STOP_LOSS"
             position.exit_price_usd = snapshot.price_usd
             position.exit_reason = "stop_loss"
-
 
     @classmethod
     def _position_from_dict(cls, data: dict[str, Any]) -> LivePaperPosition:
