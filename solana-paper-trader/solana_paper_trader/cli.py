@@ -148,6 +148,7 @@ def _run_live_scan(args: argparse.Namespace) -> int:
         )
     except PaperLedgerPersistenceError as error:
         raise SystemExit(str(error)) from error
+
     cycle = 0
     try:
         while continuous or cycle < args.cycles:
@@ -160,19 +161,31 @@ def _run_live_scan(args: argparse.Namespace) -> int:
                     time.sleep(error.retry_after_seconds)
                     continue
                 raise
+
             cycle += 1
-                        open_snapshots = []
+
+            # Refresh every already-open position independently of latest-token discovery.
+            open_snapshots = []
             for position in ledger.positions.values():
                 if position.status != "OPEN":
                     continue
                 try:
                     snapshot = scanner.token_snapshot(position.mint)
-                except MarketDataError:
+                except MarketDataError as error:
+                    if not args.json:
+                        print(
+                            f"Unable to refresh {position.symbol}; "
+                            "keeping the position open until the next cycle."
+                        )
                     continue
                 if snapshot is not None:
                     open_snapshots.append(snapshot)
+
             ledger.update_open_positions(open_snapshots)
+
+            # Process newly discovered tokens and open eligible paper positions.
             paper_positions = ledger.update(list(latest_scan.scanned))
+
             if args.json:
                 print(
                     json.dumps(
@@ -183,8 +196,10 @@ def _run_live_scan(args: argparse.Namespace) -> int:
                 )
             else:
                 _print_live_scan(latest_scan, paper_positions, cycle)
+
             if continuous or cycle < args.cycles:
                 time.sleep(args.interval_seconds)
+
     except MarketDataError as error:
         raise SystemExit(str(error)) from error
     except PaperLedgerPersistenceError as error:
