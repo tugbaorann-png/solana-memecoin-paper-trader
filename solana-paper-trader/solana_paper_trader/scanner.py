@@ -163,7 +163,8 @@ class DexscreenerClient:
         if not isinstance(pairs, list):
             return []
         return [pair for pair in pairs if isinstance(pair, dict)]
-        def token_snapshot(self, mint: str) -> TokenSnapshot | None:
+
+    def token_snapshot(self, mint: str) -> TokenSnapshot | None:
         pairs = self.token_pairs(mint)
         solana_pairs = [
             pair
@@ -175,6 +176,7 @@ class DexscreenerClient:
         if pair is None:
             return None
         return _snapshot_from_pair(pair, datetime.now(timezone.utc))
+
     def scan(self, limit: int = 20, config: ScannerConfig | None = None) -> LiveScanResult:
         scanner_config = config or ScannerConfig()
         observed_at = datetime.now(timezone.utc)
@@ -224,11 +226,11 @@ class DexscreenerClient:
                 ) from error
             raise MarketDataError(f"Dexscreener returned HTTP {error.code}.") from error
         except (URLError, TimeoutError, OSError, json.JSONDecodeError) as error:
-                raise MarketDataError(
+            raise MarketDataError(
                 "Unable to read Dexscreener public market data.",
                 retryable=True,
                 retry_after_seconds=10,
-                        ) from error
+            ) from error
 
 
 def _best_liquidity_pair(pairs: list[dict[str, Any]]) -> dict[str, Any] | None:
