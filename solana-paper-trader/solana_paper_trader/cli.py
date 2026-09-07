@@ -161,6 +161,17 @@ def _run_live_scan(args: argparse.Namespace) -> int:
                     continue
                 raise
             cycle += 1
+                        open_snapshots = []
+            for position in ledger.positions.values():
+                if position.status != "OPEN":
+                    continue
+                try:
+                    snapshot = scanner.token_snapshot(position.mint)
+                except MarketDataError:
+                    continue
+                if snapshot is not None:
+                    open_snapshots.append(snapshot)
+            ledger.update_open_positions(open_snapshots)
             paper_positions = ledger.update(list(latest_scan.scanned))
             if args.json:
                 print(
