@@ -6,4 +6,4 @@ COPY . .
 
 RUN pip install --no-cache-dir .
 
-CMD ["python", "live_trader.py"]
+CMD ["sh", "-c", "set -a; . /etc/secrets/runtime.env; set +a; exec python live_trader.py"]
