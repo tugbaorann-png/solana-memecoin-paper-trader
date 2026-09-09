@@ -498,63 +498,109 @@ class LiveTrader:
             flush=True,
         )
 
-    def _manage_open(self) -> None:
+        def _manage_open(self) -> None:
         position = self.state.data.get("open_position")
         if not isinstance(position, dict):
             return
+
         mint = str(position["mint"])
         amount = int(position["token_amount"])
         entry_sol = int(position["entry_sol_lamports"])
 
         quote = self.jupiter.order(mint, SOL_MINT, amount)
         executable_sol = self._amount(quote, "outAmount")
+
         if executable_sol <= 0:
-            print(f"OPEN {position['symbol']}: no executable sell quote; will retry.", flush=True)
+            print(
+                f"OPEN {position['symbol']}: no executable sell quote; will retry.",
+                flush=True,
+            )
             return
+
         pnl_pct = (executable_sol / entry_sol - 1) * 100
+
         print(
             f"OPEN {position['symbol']} | executable P/L={pnl_pct:+.2f}% | "
             f"quote={executable_sol / 1e9:.6f} SOL",
             flush=True,
         )
-        if pnl_pct < self.config.take_profit_pct and pnl_pct > self.config.stop_loss_pct:
+
+        if (
+            pnl_pct < self.config.take_profit_pct
+            and pnl_pct > self.config.stop_loss_pct
+        ):
             return
 
-        reason = "TAKE_PROFIT" if pnl_pct >= self.config.take_profit_pct else "STOP_LOSS"
+        reason = (
+            "TAKE_PROFIT"
+            if pnl_pct >= self.config.take_profit_pct
+            else "STOP_LOSS"
+        )
+
         if not self.config.live_enabled:
-            print(f"{reason} reached, but live trading is not armed; NO SELL sent.", flush=True)
+            print(
+                f"{reason} reached, but live trading is not armed; NO SELL sent.",
+                flush=True,
+            )
             return
 
-        order = self.jupiter.order(mint, SOL_MINT, amount, taker=self.wallet_address)
+        order = self.jupiter.order(
+            mint,
+            SOL_MINT,
+            amount,
+            taker=self.wallet_address,
+        )
+
         sell_impact = float(order.get("priceImpact") or 0)
 
         print(
-    f"EXIT ORDER {position['symbol']} | reason={reason} | "
-    f"priceImpact={sell_impact:.2f}%",
-    flush=True,
-       )
-        print(f"SELLING {position['symbol']} because {reason}", flush=True)
+            f"EXIT ORDER {position['symbol']} | reason={reason} | "
+            f"priceImpact={sell_impact:.2f}%",
+            flush=True,
+        )
+
+        print(
+            f"SELLING {position['symbol']} because {reason}",
+            flush=True,
+        )
+
         result = self._execute_order(order)
-        sol_received = self._amount(result, "outputAmountResult", "totalOutputAmount")
+
+        sol_received = self._amount(
+            result,
+            "outputAmountResult",
+            "totalOutputAmount",
+        )
+
         if sol_received <= 0:
             raise FatalLiveBotError(
-                "Sell confirmed but returned SOL amount is missing. Bot stopped for manual reconciliation."
+                "Sell confirmed but returned SOL amount is missing. "
+                "Bot stopped for manual reconciliation."
             )
+
         realized = sol_received - entry_sol
-        completed = int(self.state.data.get("completed_round_trips", 0)) + 1
-        self.state.data["completed_round_trips"] = completed
+
+        completed = (
+            int(self.state.data.get("completed_round_trips", 0)) + 1
+        )
+
         wins = int(self.state.data.get("wins", 0))
         losses = int(self.state.data.get("losses", 0))
-        net_pnl = int(self.state.data.get("net_realized_pnl_lamports", 0)) + realized
+        net_pnl = (
+            int(self.state.data.get("net_realized_pnl_lamports", 0))
+            + realized
+        )
 
         if realized > 0:
             wins += 1
         elif realized < 0:
             losses += 1
 
+        self.state.data["completed_round_trips"] = completed
         self.state.data["wins"] = wins
         self.state.data["losses"] = losses
         self.state.data["net_realized_pnl_lamports"] = net_pnl
+
         self.state.data["last_trade"] = {
             **position,
             "closed_at": datetime.now(timezone.utc).isoformat(),
@@ -564,20 +610,19 @@ class LiveTrader:
             "realized_pnl_lamports": realized,
             "realized_pnl_pct": realized / entry_sol * 100,
         }
+
         self.state.data["open_position"] = None
         self.state.save()
-                 print(
-            f"SELL SUCCESS {position['symbol']} | {reason} | realized={realized / 1e9:+.6f} SOL "
-            f"({realized / entry_sol * 100:+.2f}%) | signature={result.get('signature')} | "
-            f"SUMMARY Trades={completed} Wins={wins} Losses={losses} NetP/L={net_pnl / 1e9:+.6f} SOL",
-            flush=True,
-        )       
 
-    def run(self) -> None:
-        print("=" * 72, flush=True)
-        print("SOLANA FIRST-LIVE TEST BOT", flush=True)
-        print(f"Privy wallet: {self.wallet_address}", flush=True)
-        print(f"Live armed: {self.config.live_enabled}", flush=True)
+        print(
+            f"SELL SUCCESS {position['symbol']} | {reason} | "
+            f"realized={realized / 1e9:+.6f} SOL "
+            f"({realized / entry_sol * 100:+.2f}%) | "
+            f"signature={result.get('signature')} | "
+            f"SUMMARY Trades={completed} Wins={wins} "
+            f"Losses={losses} NetP/L={net_pnl / 1e9:+.6f} SOL",
+            flush=True,
+        )
         print(f"Position: {self.config.position_lamports / 1e9:.6f} SOL", flush=True)
         print(f"TP/SL: +{self.config.take_profit_pct:.1f}% / {self.config.stop_loss_pct:.1f}%", flush=True)
         print(f"Max completed round trips: {self.config.max_completed_round_trips}", flush=True)
