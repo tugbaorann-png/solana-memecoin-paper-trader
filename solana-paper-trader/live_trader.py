@@ -16,7 +16,6 @@ from urllib.request import Request, urlopen
 from solana_paper_trader.scanner import DexscreenerClient, MarketDataError, ScannerConfig, TokenScan
 
 SOL_MINT = "So11111111111111111111111111111111111111112"
-STANDARD_SPL_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 PRIVY_BASE_URL = "https://api.privy.io"
 JUPITER_BASE_URL = "https://api.jup.ag"
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
@@ -34,18 +33,15 @@ class FatalLiveBotError(LiveBotError):
 class Config:
     position_lamports: int = int(os.getenv("POSITION_LAMPORTS", "5000000"))
     reserve_lamports: int = int(os.getenv("RESERVE_LAMPORTS", "15000000"))
-    take_profit_pct: float = float(os.getenv("TAKE_PROFIT_PCT", "30"))
+    take_profit_pct: float = float(os.getenv("TAKE_PROFIT_PCT", "20"))
     stop_loss_pct: float = float(os.getenv("STOP_LOSS_PCT", "-10"))
-    scan_interval_seconds: float = float(os.getenv("SCAN_INTERVAL_SECONDS", "60"))
-    open_poll_seconds: float = float(os.getenv("OPEN_POLL_SECONDS", "2"))
+    scan_interval_seconds: float = float(os.getenv("SCAN_INTERVAL_SECONDS", "90"))
+    open_poll_seconds: float = float(os.getenv("OPEN_POLL_SECONDS", "10"))
     scan_limit: int = int(os.getenv("SCAN_LIMIT", "20"))
-    max_price_impact_pct: float = float(os.getenv("MAX_PRICE_IMPACT_PCT", "2.5"))
-    min_roundtrip_return_pct: float = float(os.getenv("MIN_ROUNDTRIP_RETURN_PCT", "94"))
-    min_organic_score: float = float(os.getenv("MIN_ORGANIC_SCORE", "35"))
-    min_holder_count: int = int(os.getenv("MIN_HOLDER_COUNT", "300"))
-    max_top_holders_pct: float = float(os.getenv("MAX_TOP_HOLDERS_PCT", "60"))
-    max_dev_balance_pct: float = float(os.getenv("MAX_DEV_BALANCE_PCT", "20"))
-    max_completed_round_trips: int = int(os.getenv("MAX_COMPLETED_ROUND_TRIPS", "3"))
+    max_open_positions: int = int(os.getenv("MAX_OPEN_POSITIONS", "2"))
+    max_completed_round_trips: int = int(os.getenv("MAX_COMPLETED_ROUND_TRIPS", "0"))
+    max_price_impact_pct: float = float(os.getenv("MAX_PRICE_IMPACT_PCT", "5"))
+    min_roundtrip_return_pct: float = float(os.getenv("MIN_ROUNDTRIP_RETURN_PCT", "90"))
     reject_cooldown_seconds: int = int(os.getenv("REJECT_COOLDOWN_SECONDS", "900"))
 
     @property
@@ -78,9 +74,10 @@ class HttpClient:
         body: dict[str, Any] | None = None,
     ) -> Any:
         data = json.dumps(body).encode("utf-8") if body is not None else None
+
         merged = {
             "Accept": "application/json",
-            "User-Agent": "solana-live-bot/first-live-test",
+            "User-Agent": "solana-live-bot/paper-strategy-live",
         }
 
         if body is not None:
@@ -107,14 +104,23 @@ class HttpClient:
                 f"HTTP {error.code} from {url}: {payload[:500]}"
             ) from error
 
-        except (URLError, TimeoutError, OSError, json.JSONDecodeError) as error:
+        except (
+            URLError,
+            TimeoutError,
+            OSError,
+            json.JSONDecodeError,
+        ) as error:
             raise LiveBotError(
                 f"Network/API error from {url}: {error}"
             ) from error
 
 
 class JupiterClient:
-    def __init__(self, api_key: str, http: HttpClient) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        http: HttpClient,
+    ) -> None:
         if not api_key:
             raise FatalLiveBotError("Missing JUPITER_API_KEY")
 
@@ -163,27 +169,6 @@ class JupiterClient:
         finally:
             self._last_request_at = time.monotonic()
 
-    def token_info(
-        self,
-        mint: str,
-    ) -> dict[str, Any] | None:
-        payload = self._get(
-            "/tokens/v2/search",
-            {"query": mint},
-        )
-
-        if not isinstance(payload, list):
-            return None
-
-        for item in payload:
-            if (
-                isinstance(item, dict)
-                and str(item.get("id")) == mint
-            ):
-                return item
-
-        return None
-
     def order(
         self,
         input_mint: str,
@@ -211,7 +196,11 @@ class JupiterClient:
                 "Jupiter returned an invalid order response"
             )
 
-        if payload.get("errorCode") not in (None, 0, "0"):
+        if payload.get("errorCode") not in (
+            None,
+            0,
+            "0",
+        ):
             raise LiveBotError(
                 f"Jupiter order error: "
                 f"{payload.get('errorCode')} "
@@ -309,7 +298,10 @@ class PrivySigner:
                 payload["data"]["signed_transaction"]
             )
 
-        except (KeyError, TypeError) as error:
+        except (
+            KeyError,
+            TypeError,
+        ) as error:
             raise LiveBotError(
                 f"Privy did not return a signed transaction: {payload}"
             ) from error
@@ -323,7 +315,7 @@ class PrivySigner:
 
 
 class StateStore:
-    version = 1
+    version = 2
 
     def __init__(
         self,
@@ -335,7 +327,7 @@ class StateStore:
     def _default(self) -> dict[str, Any]:
         return {
             "version": self.version,
-            "open_position": None,
+            "open_positions": {},
             "seen_mints": [],
             "rejected_until": {},
             "completed_round_trips": 0,
@@ -356,22 +348,126 @@ class StateStore:
                 )
             )
 
-        except (OSError, json.JSONDecodeError) as error:
+        except (
+            OSError,
+            json.JSONDecodeError,
+        ) as error:
             raise FatalLiveBotError(
                 f"Cannot safely load live state: {error}"
             ) from error
 
-        if (
-            not isinstance(payload, dict)
-            or payload.get("version") != self.version
+        if not isinstance(
+            payload,
+            dict,
+        ):
+            raise FatalLiveBotError(
+                "Live state file is not a JSON object"
+            )
+
+        old_version = int(
+            payload.get("version")
+            or 1
+        )
+
+        if old_version not in (
+            1,
+            2,
         ):
             raise FatalLiveBotError(
                 "Live state file has an unsupported format/version"
             )
 
+        if old_version == 1:
+            old_open = payload.get(
+                "open_position"
+            )
+
+            open_positions: dict[str, Any] = {}
+
+            if (
+                isinstance(old_open, dict)
+                and old_open.get("mint")
+            ):
+                open_positions[
+                    str(old_open["mint"])
+                ] = old_open
+
+            migrated = self._default()
+
+            migrated[
+                "open_positions"
+            ] = open_positions
+
+            migrated[
+                "seen_mints"
+            ] = list(
+                payload.get(
+                    "seen_mints"
+                )
+                or []
+            )
+
+            migrated[
+                "rejected_until"
+            ] = dict(
+                payload.get(
+                    "rejected_until"
+                )
+                or {}
+            )
+
+            migrated[
+                "completed_round_trips"
+            ] = int(
+                payload.get(
+                    "completed_round_trips"
+                )
+                or 0
+            )
+
+            migrated[
+                "wins"
+            ] = int(
+                payload.get(
+                    "wins"
+                )
+                or 0
+            )
+
+            migrated[
+                "losses"
+            ] = int(
+                payload.get(
+                    "losses"
+                )
+                or 0
+            )
+
+            migrated[
+                "net_realized_pnl_lamports"
+            ] = int(
+                payload.get(
+                    "net_realized_pnl_lamports"
+                )
+                or 0
+            )
+
+            migrated[
+                "last_trade"
+            ] = payload.get(
+                "last_trade"
+            )
+
+            payload = migrated
+
         payload.setdefault(
-            "open_position",
-            None,
+            "version",
+            self.version,
+        )
+
+        payload.setdefault(
+            "open_positions",
+            {},
         )
 
         payload.setdefault(
@@ -408,6 +504,10 @@ class StateStore:
             "last_trade",
             None,
         )
+
+        payload[
+            "version"
+        ] = self.version
 
         return payload
 
@@ -451,6 +551,7 @@ class StateStore:
                 os.unlink(
                     temp_name
                 )
+
             except OSError:
                 pass
 
@@ -466,21 +567,36 @@ class LiveTrader:
         self.http = HttpClient()
 
         self.jupiter = JupiterClient(
-            os.getenv("JUPITER_API_KEY", ""),
+            os.getenv(
+                "JUPITER_API_KEY",
+                "",
+            ),
             self.http,
         )
 
         self.signer = PrivySigner(
-            os.getenv("PRIVY_APP_ID", ""),
-            os.getenv("PRIVY_APP_SECRET", ""),
-            os.getenv("PRIVY_WALLET_ID", ""),
+            os.getenv(
+                "PRIVY_APP_ID",
+                "",
+            ),
+            os.getenv(
+                "PRIVY_APP_SECRET",
+                "",
+            ),
+            os.getenv(
+                "PRIVY_WALLET_ID",
+                "",
+            ),
             self.http,
         )
 
         wallet = self.signer.wallet()
 
         self.wallet_address = str(
-            wallet.get("address", "")
+            wallet.get(
+                "address",
+                "",
+            )
         )
 
         if not self.wallet_address:
@@ -491,7 +607,14 @@ class LiveTrader:
         self.scanner = DexscreenerClient()
 
         self.scan_config = ScannerConfig(
-            min_liquidity_usd=25_000
+            min_liquidity_usd=25_000,
+            min_market_cap_usd=20_000,
+            min_token_age_minutes=15,
+            min_volume_5m_usd=1_000,
+            min_transactions_5m=5,
+            min_buys_5m=1,
+            max_abs_price_change_5m_pct=250,
+            max_volume_to_liquidity_ratio=20,
         )
 
         self.state = StateStore(
@@ -515,14 +638,19 @@ class LiveTrader:
         )
 
         if (
-            not isinstance(payload, dict)
+            not isinstance(
+                payload,
+                dict,
+            )
             or payload.get("error")
         ):
             raise LiveBotError(
                 f"Solana RPC error: {payload}"
             )
 
-        return payload.get("result")
+        return payload.get(
+            "result"
+        )
 
     def sol_balance_lamports(
         self,
@@ -557,14 +685,18 @@ class LiveTrader:
         *keys: str,
     ) -> int:
         for key in keys:
-            value = payload.get(key)
+            value = payload.get(
+                key
+            )
 
             if value not in (
                 None,
                 "",
             ):
                 try:
-                    return int(value)
+                    return int(
+                        value
+                    )
 
                 except (
                     TypeError,
@@ -574,171 +706,28 @@ class LiveTrader:
 
         return 0
 
-    def _token_safety_reasons(
+    def _open_positions(
         self,
-        mint: str,
-    ) -> tuple[
-        dict[str, Any] | None,
-        list[str],
-    ]:
-        info = self.jupiter.token_info(
-            mint
+    ) -> dict[str, dict[str, Any]]:
+        raw = self.state.data.setdefault(
+            "open_positions",
+            {},
         )
 
-        if info is None:
-            return (
-                None,
-                [
-                    "missing_jupiter_token_info"
-                ],
-            )
-
-        reasons: list[str] = []
-
-        audit = (
-            info.get("audit")
-            if isinstance(
-                info.get("audit"),
-                dict,
-            )
-            else {}
-        )
-
-        tags = {
-            str(tag).lower()
-            for tag in (
-                info.get("tags")
-                or []
-            )
-        }
-
-        if (
-            "banned" in tags
-            or str(
-                info.get(
-                    "verification",
-                    "",
-                )
-            ).lower()
-            == "banned"
+        if not isinstance(
+            raw,
+            dict,
         ):
-            reasons.append(
-                "jupiter_banned"
+            raise FatalLiveBotError(
+                "open_positions state is invalid"
             )
 
-        if (
-            audit.get("isSus")
-            is True
-        ):
-            reasons.append(
-                "jupiter_suspicious"
-            )
-
-        if (
-            audit.get(
-                "mintAuthorityDisabled"
-            )
-            is not True
-        ):
-            reasons.append(
-                "mint_authority_not_confirmed_disabled"
-            )
-
-        if (
-            audit.get(
-                "freezeAuthorityDisabled"
-            )
-            is not True
-        ):
-            reasons.append(
-                "freeze_authority_not_confirmed_disabled"
-            )
-
-        if (
-            str(
-                info.get(
-                    "tokenProgram",
-                    "",
-                )
-            )
-            != STANDARD_SPL_TOKEN_PROGRAM
-        ):
-            reasons.append(
-                "non_standard_token_program"
-            )
-
-        organic = float(
-            info.get(
-                "organicScore"
-            )
-            or 0
-        )
-
-        holders = int(
-            info.get(
-                "holderCount"
-            )
-            or 0
-        )
-
-        if (
-            organic
-            < self.config.min_organic_score
-        ):
-            reasons.append(
-                f"organic_score_{organic:.1f}_below_"
-                f"{self.config.min_organic_score:.1f}"
-            )
-
-        if (
-            holders
-            < self.config.min_holder_count
-        ):
-            reasons.append(
-                f"holders_{holders}_below_"
-                f"{self.config.min_holder_count}"
-            )
-
-        top_holders = audit.get(
-            "topHoldersPercentage"
-        )
-
-        if (
-            top_holders is not None
-            and float(top_holders)
-            > self.config.max_top_holders_pct
-        ):
-            reasons.append(
-                f"top_holders_"
-                f"{float(top_holders):.1f}_pct"
-            )
-
-        dev_balance = audit.get(
-            "devBalancePercentage"
-        )
-
-        if (
-            dev_balance is not None
-            and float(dev_balance)
-            > self.config.max_dev_balance_pct
-        ):
-            reasons.append(
-                f"dev_balance_"
-                f"{float(dev_balance):.1f}_pct"
-            )
-
-        return (
-            info,
-            reasons,
-        )
+        return raw
 
     def _route_safety(
         self,
         mint: str,
-    ) -> tuple[
-        dict[str, Any] | None,
-        list[str],
-    ]:
+    ) -> list[str]:
         reasons: list[str] = []
 
         buy_quote = self.jupiter.order(
@@ -760,17 +749,14 @@ class LiveTrader:
         )
 
         if buy_out <= 0:
-            reasons.append(
+            return [
                 "no_buy_route"
-            )
-
-            return (
-                None,
-                reasons,
-            )
+            ]
 
         if (
-            abs(buy_impact)
+            abs(
+                buy_impact
+            )
             > self.config.max_price_impact_pct
         ):
             reasons.append(
@@ -802,7 +788,9 @@ class LiveTrader:
             )
 
         if (
-            abs(sell_impact)
+            abs(
+                sell_impact
+            )
             > self.config.max_price_impact_pct
         ):
             reasons.append(
@@ -826,40 +814,28 @@ class LiveTrader:
                     f"{roundtrip_pct:.1f}_pct"
                 )
 
-        return (
-            buy_quote,
-            reasons,
-        )
+        return reasons
 
-    def _candidate(
+    def _cleanup_rejected_cache(
         self,
-    ) -> TokenScan | None:
-        result = self.scanner.scan(
-            limit=self.config.scan_limit,
-            config=self.scan_config,
-        )
-
-        seen = set(
-            self.state.data.get(
-                "seen_mints",
-                [],
-            )
-        )
-
-        rejected_until = (
-            self.state.data.setdefault(
-                "rejected_until",
-                {},
-            )
+    ) -> None:
+        rejected_until = self.state.data.setdefault(
+            "rejected_until",
+            {},
         )
 
         now = time.time()
 
         expired = [
             mint
-            for mint, until
-            in rejected_until.items()
-            if float(until) <= now
+            for mint, until in list(
+                rejected_until.items()
+            )
+            if float(
+                until
+                or 0
+            )
+            <= now
         ]
 
         for mint in expired:
@@ -868,10 +844,40 @@ class LiveTrader:
                 None,
             )
 
+    def _scan_candidates(
+        self,
+    ) -> list[TokenScan]:
+        result = self.scanner.scan(
+            limit=self.config.scan_limit,
+            config=self.scan_config,
+        )
+
+        self._cleanup_rejected_cache()
+
+        seen = set(
+            self.state.data.get(
+                "seen_mints",
+                [],
+            )
+        )
+
+        rejected_until = self.state.data.setdefault(
+            "rejected_until",
+            {},
+        )
+
+        open_positions = self._open_positions()
+        now = time.time()
+
+        candidates: list[TokenScan] = []
+
         for scan in result.eligible:
             mint = scan.snapshot.mint
 
-            if mint in seen:
+            if (
+                mint in open_positions
+                or mint in seen
+            ):
                 continue
 
             if (
@@ -880,100 +886,29 @@ class LiveTrader:
                         mint,
                         0,
                     )
+                    or 0
                 )
                 > now
             ):
                 print(
-                    f"SKIP {scan.snapshot.symbol} "
-                    f"{mint}: rejected recently",
+                    f"SKIP "
+                    f"{scan.snapshot.symbol} "
+                    f"{mint}: "
+                    f"execution check rejected recently",
                     flush=True,
                 )
 
                 continue
 
             try:
-                info, reasons = (
-                    self._token_safety_reasons(
-                        mint
-                    )
+                reasons = self._route_safety(
+                    mint
                 )
-
-                if reasons:
-                    rejected_until[mint] = (
-                        time.time()
-                        + self.config.reject_cooldown_seconds
-                    )
-
-                    self.state.save()
-
-                    print(
-                        f"REJECT "
-                        f"{scan.snapshot.symbol} "
-                        f"{mint}: "
-                        f"{', '.join(reasons)}",
-                        flush=True,
-                    )
-
-                    continue
-
-                _, route_reasons = (
-                    self._route_safety(
-                        mint
-                    )
-                )
-
-                if route_reasons:
-                    rejected_until[mint] = (
-                        time.time()
-                        + self.config.reject_cooldown_seconds
-                    )
-
-                    self.state.save()
-
-                    print(
-                        f"REJECT "
-                        f"{scan.snapshot.symbol} "
-                        f"{mint}: "
-                        f"{', '.join(route_reasons)}",
-                        flush=True,
-                    )
-
-                    continue
-
-                organic = float(
-                    (
-                        info
-                        or {}
-                    ).get(
-                        "organicScore"
-                    )
-                    or 0
-                )
-
-                holders = int(
-                    (
-                        info
-                        or {}
-                    ).get(
-                        "holderCount"
-                    )
-                    or 0
-                )
-
-                print(
-                    f"SAFE CANDIDATE "
-                    f"{scan.snapshot.symbol} "
-                    f"{mint} | "
-                    f"rank={scan.rank_score:.2f} "
-                    f"organic={organic:.1f} "
-                    f"holders={holders}",
-                    flush=True,
-                )
-
-                return scan
 
             except LiveBotError as error:
-                rejected_until[mint] = (
+                rejected_until[
+                    mint
+                ] = (
                     time.time()
                     + self.config.reject_cooldown_seconds
                 )
@@ -981,632 +916,15 @@ class LiveTrader:
                 self.state.save()
 
                 print(
-                    f"Candidate validation error for "
-                    f"{scan.snapshot.symbol}: "
+                    f"EXECUTION CHECK ERROR "
+                    f"{scan.snapshot.symbol} "
+                    f"{mint}: "
                     f"{error}",
                     flush=True,
                 )
 
                 continue
 
-        return None
-
-    def _execute_order(
-        self,
-        order: dict[str, Any],
-    ) -> dict[str, Any]:
-        transaction = str(
-            order.get(
-                "transaction"
-            )
-            or ""
-        )
-
-        request_id = str(
-            order.get(
-                "requestId"
-            )
-            or ""
-        )
-
-        if (
-            not transaction
-            or not request_id
-        ):
-            raise LiveBotError(
-                "Jupiter order is missing transaction/requestId"
-            )
-
-        signed = self.signer.sign_transaction(
-            transaction
-        )
-
-        result = self.jupiter.execute(
-            signed,
-            request_id,
-        )
-
-        if (
-            result.get("status")
-            != "Success"
-            or int(
-                result.get("code")
-                or 0
-            )
-            != 0
-        ):
-            raise LiveBotError(
-                f"Swap failed: "
-                f"status={result.get('status')} "
-                f"code={result.get('code')} "
-                f"error={result.get('error')} "
-                f"signature={result.get('signature')}"
-            )
-
-        return result
-
-    def _open(
-        self,
-        scan: TokenScan,
-    ) -> None:
-        if not self.config.live_enabled:
-            print(
-                "LIVE_TRADING_ENABLED is not armed; "
-                "candidate found but NO REAL TRADE was sent.",
-                flush=True,
-            )
-
-            return
-
-        balance = (
-            self.sol_balance_lamports()
-        )
-
-        required = (
-            self.config.position_lamports
-            + self.config.reserve_lamports
-        )
-
-        if balance < required:
-            raise LiveBotError(
-                f"Insufficient SOL reserve: "
-                f"balance={balance / 1e9:.6f}, "
-                f"required={required / 1e9:.6f} SOL"
-            )
-
-        mint = scan.snapshot.mint
-
-        order = self.jupiter.order(
-            SOL_MINT,
-            mint,
-            self.config.position_lamports,
-            taker=self.wallet_address,
-        )
-
-        price_impact = float(
-            order.get(
-                "priceImpact"
-            )
-            or 0
-        )
-
-        if (
-            abs(price_impact)
-            > self.config.max_price_impact_pct
-        ):
-            raise LiveBotError(
-                f"Fresh buy price impact too high: "
-                f"{price_impact:.2f}%"
-            )
-
-        print(
-            f"BUYING "
-            f"{scan.snapshot.symbol}: "
-            f"{self.config.position_lamports / 1e9:.6f} SOL",
-            flush=True,
-        )
-
-        result = self._execute_order(
-            order
-        )
-
-        token_amount = self._amount(
-            result,
-            "outputAmountResult",
-            "totalOutputAmount",
-        )
-
-        sol_spent = self._amount(
-            result,
-            "inputAmountResult",
-            "totalInputAmount",
-        )
-
-        if (
-            token_amount <= 0
-            or sol_spent <= 0
-        ):
-            raise FatalLiveBotError(
-                "Buy confirmed but returned amounts are missing. "
-                "Bot stopped to avoid an untracked live position."
-            )
-
-        opened_at = (
-            datetime.now(
-                timezone.utc
-            ).isoformat()
-        )
-
-        self.state.data[
-            "open_position"
-        ] = {
-            "symbol": scan.snapshot.symbol,
-            "mint": mint,
-            "token_amount": token_amount,
-            "entry_sol_lamports": sol_spent,
-            "opened_at": opened_at,
-            "buy_signature": str(
-                result.get(
-                    "signature"
-                )
-                or ""
-            ),
-        }
-
-        seen = list(
-            dict.fromkeys(
-                [
-                    *self.state.data.get(
-                        "seen_mints",
-                        [],
-                    ),
-                    mint,
-                ]
-            )
-        )[-5000:]
-
-        self.state.data[
-            "seen_mints"
-        ] = seen
-
-        self.state.save()
-
-        print(
-            f"BUY SUCCESS "
-            f"{scan.snapshot.symbol} | "
-            f"signature="
-            f"{result.get('signature')} | "
-            f"received_atomic="
-            f"{token_amount}",
-            flush=True,
-        )
-
-    def _manage_open(
-        self,
-    ) -> None:
-        position = self.state.data.get(
-            "open_position"
-        )
-
-        if not isinstance(
-            position,
-            dict,
-        ):
-            return
-
-        mint = str(
-            position["mint"]
-        )
-
-        amount = int(
-            position["token_amount"]
-        )
-
-        entry_sol = int(
-            position[
-                "entry_sol_lamports"
-            ]
-        )
-
-        quote = self.jupiter.order(
-            mint,
-            SOL_MINT,
-            amount,
-        )
-
-        executable_sol = self._amount(
-            quote,
-            "outAmount",
-        )
-
-        if executable_sol <= 0:
-            print(
-                f"OPEN "
-                f"{position['symbol']}: "
-                f"no executable sell quote; "
-                f"will retry.",
-                flush=True,
-            )
-
-            return
-
-        pnl_pct = (
-            executable_sol
-            / entry_sol
-            - 1
-        ) * 100
-
-        print(
-            f"OPEN "
-            f"{position['symbol']} | "
-            f"executable P/L="
-            f"{pnl_pct:+.2f}% | "
-            f"quote="
-            f"{executable_sol / 1e9:.6f} SOL",
-            flush=True,
-        )
-
-        if (
-            pnl_pct
-            < self.config.take_profit_pct
-            and pnl_pct
-            > self.config.stop_loss_pct
-        ):
-            return
-
-        reason = (
-            "TAKE_PROFIT"
-            if pnl_pct
-            >= self.config.take_profit_pct
-            else "STOP_LOSS"
-        )
-
-        if not self.config.live_enabled:
-            print(
-                f"{reason} reached, "
-                f"but live trading is not armed; "
-                f"NO SELL sent.",
-                flush=True,
-            )
-
-            return
-
-        order = self.jupiter.order(
-            mint,
-            SOL_MINT,
-            amount,
-            taker=self.wallet_address,
-        )
-
-        sell_impact = float(
-            order.get(
-                "priceImpact"
-            )
-            or 0
-        )
-
-        print(
-            f"EXIT ORDER "
-            f"{position['symbol']} | "
-            f"reason={reason} | "
-            f"priceImpact="
-            f"{sell_impact:.2f}%",
-            flush=True,
-        )
-
-        print(
-            f"SELLING "
-            f"{position['symbol']} "
-            f"because {reason}",
-            flush=True,
-        )
-
-        result = self._execute_order(
-            order
-        )
-
-        sol_received = self._amount(
-            result,
-            "outputAmountResult",
-            "totalOutputAmount",
-        )
-
-        if sol_received <= 0:
-            raise FatalLiveBotError(
-                "Sell confirmed but returned SOL amount is missing. "
-                "Bot stopped for manual reconciliation."
-            )
-
-        realized = (
-            sol_received
-            - entry_sol
-        )
-
-        completed = (
-            int(
-                self.state.data.get(
-                    "completed_round_trips",
-                    0,
-                )
-            )
-            + 1
-        )
-
-        wins = int(
-            self.state.data.get(
-                "wins",
-                0,
-            )
-        )
-
-        losses = int(
-            self.state.data.get(
-                "losses",
-                0,
-            )
-        )
-
-        net_pnl = (
-            int(
-                self.state.data.get(
-                    "net_realized_pnl_lamports",
-                    0,
-                )
-            )
-            + realized
-        )
-
-        if realized > 0:
-            wins += 1
-
-        elif realized < 0:
-            losses += 1
-
-        self.state.data[
-            "completed_round_trips"
-        ] = completed
-
-        self.state.data[
-            "wins"
-        ] = wins
-
-        self.state.data[
-            "losses"
-        ] = losses
-
-        self.state.data[
-            "net_realized_pnl_lamports"
-        ] = net_pnl
-
-        self.state.data[
-            "last_trade"
-        ] = {
-            **position,
-            "closed_at": (
-                datetime.now(
-                    timezone.utc
-                ).isoformat()
-            ),
-            "sell_signature": str(
-                result.get(
-                    "signature"
-                )
-                or ""
-            ),
-            "exit_reason": reason,
-            "sol_received_lamports": sol_received,
-            "realized_pnl_lamports": realized,
-            "realized_pnl_pct": (
-                realized
-                / entry_sol
-                * 100
-            ),
-        }
-
-        self.state.data[
-            "open_position"
-        ] = None
-
-        self.state.save()
-
-        print(
-            f"SELL SUCCESS "
-            f"{position['symbol']} | "
-            f"{reason} | "
-            f"realized="
-            f"{realized / 1e9:+.6f} SOL "
-            f"("
-            f"{realized / entry_sol * 100:+.2f}%"
-            f") | "
-            f"signature="
-            f"{result.get('signature')} | "
-            f"SUMMARY "
-            f"Trades={completed} "
-            f"Wins={wins} "
-            f"Losses={losses} "
-            f"NetP/L="
-            f"{net_pnl / 1e9:+.6f} SOL",
-            flush=True,
-        )
-
-    def run(
-        self,
-    ) -> None:
-        print(
-            "=" * 72,
-            flush=True,
-        )
-
-        print(
-            "SOLANA LIVE TRADER",
-            flush=True,
-        )
-
-        print(
-            f"Privy wallet: "
-            f"{self.wallet_address}",
-            flush=True,
-        )
-
-        print(
-            f"Live armed: "
-            f"{self.config.live_enabled}",
-            flush=True,
-        )
-
-        print(
-            f"Position: "
-            f"{self.config.position_lamports / 1e9:.6f} SOL",
-            flush=True,
-        )
-
-        print(
-            f"TP/SL: "
-            f"+{self.config.take_profit_pct:.1f}% / "
-            f"{self.config.stop_loss_pct:.1f}%",
-            flush=True,
-        )
-
-        print(
-            f"Max completed round trips: "
-            f"{self.config.max_completed_round_trips}",
-            flush=True,
-        )
-
-        print(
-            f"State: "
-            f"{self.config.state_path}",
-            flush=True,
-        )
-
-        print(
-            "Private key/seed is NOT used by this program.",
-            flush=True,
-        )
-
-        print(
-            "=" * 72,
-            flush=True,
-        )
-
-        while True:
-            try:
-                if self.state.data.get(
-                    "open_position"
-                ):
-                    self._manage_open()
-
-                    time.sleep(
-                        self.config.open_poll_seconds
-                    )
-
-                    continue
-
-                if (
-                    int(
-                        self.state.data.get(
-                            "completed_round_trips",
-                            0,
-                        )
-                    )
-                    >= self.config.max_completed_round_trips
-                ):
-                    print(
-                        "LIVE TEST COMPLETE. "
-                        "Trade limit reached; "
-                        "no more entries will be opened.",
-                        flush=True,
-                    )
-
-                    time.sleep(
-                        300
-                    )
-
-                    continue
-
-                candidate = self._candidate()
-
-                if candidate is not None:
-                    self._open(
-                        candidate
-                    )
-
-                time.sleep(
-                    self.config.scan_interval_seconds
-                )
-
-            except MarketDataError as error:
-                print(
-                    f"Dexscreener error: "
-                    f"{error}; retrying.",
-                    flush=True,
-                )
-
-                time.sleep(
-                    max(
-                        getattr(
-                            error,
-                            "retry_after_seconds",
-                            10,
-                        ),
-                        10,
-                    )
-                )
-
-            except FatalLiveBotError:
-                raise
-
-            except LiveBotError as error:
-                print(
-                    f"Live bot recoverable error: "
-                    f"{error}; retrying.",
-                    flush=True,
-                )
-
-                time.sleep(
-                    15
-                )
-
-
-def main() -> int:
-    config = Config()
-
-    if (
-        config.position_lamports <= 0
-        or config.reserve_lamports < 0
-    ):
-        raise SystemExit(
-            "Invalid position/reserve configuration"
-        )
-
-    if (
-        config.take_profit_pct <= 0
-        or config.stop_loss_pct >= 0
-    ):
-        raise SystemExit(
-            "TAKE_PROFIT_PCT must be positive "
-            "and STOP_LOSS_PCT negative"
-        )
-
-    if (
-        config.max_completed_round_trips
-        != 3
-    ):
-        raise SystemExit(
-            "This live package intentionally requires "
-            "MAX_COMPLETED_ROUND_TRIPS=3"
-        )
-
-    trader = LiveTrader(
-        config
-    )
-
-    trader.run()
-
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(
-        main()
-    )
+            if reasons:
+                rejected_until[
+                    mint
