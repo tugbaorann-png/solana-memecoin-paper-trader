@@ -368,31 +368,76 @@ class LiveTrader:
     def _candidate(self) -> TokenScan | None:
         result = self.scanner.scan(limit=self.config.scan_limit, config=self.scan_config)
         seen = set(self.state.data.get("seen_mints", []))
+
+        rejected_until = self.state.data.setdefault("rejected_until", {})
+        now = time.time()
+
+        # Süresi dolan reddedilmiş coinleri temizle
+        expired = [
+            mint
+            for mint, until in rejected_until.items()
+            if float(until) <= now
+        ]
+        for mint in expired:
+            rejected_until.pop(mint, None)
+
         for scan in result.eligible:
             mint = scan.snapshot.mint
+
             if mint in seen:
                 continue
+
+            # Son 15 dakika içinde reddedildiyse başka adaya geç
+            if float(rejected_until.get(mint, 0)) > now:
+                print(
+                    f"SKIP {scan.snapshot.symbol} {mint}: rejected recently",
+                    flush=True,
+                )
+                continue
+
             try:
                 info, reasons = self._token_safety_reasons(mint)
+
                 if reasons:
-                    print(f"REJECT {scan.snapshot.symbol} {mint}: {', '.join(reasons)}", flush=True)
+                    rejected_until[mint] = time.time() + 900
+                    self.state.save()
+                    print(
+                        f"REJECT {scan.snapshot.symbol} {mint}: {', '.join(reasons)}",
+                        flush=True,
+                    )
                     continue
+
                 _, route_reasons = self._route_safety(mint)
+
                 if route_reasons:
-                    print(f"REJECT {scan.snapshot.symbol} {mint}: {', '.join(route_reasons)}", flush=True)
+                    rejected_until[mint] = time.time() + 900
+                    self.state.save()
+                    print(
+                        f"REJECT {scan.snapshot.symbol} {mint}: {', '.join(route_reasons)}",
+                        flush=True,
+                    )
                     continue
+
                 organic = float((info or {}).get("organicScore") or 0)
                 holders = int((info or {}).get("holderCount") or 0)
+
                 print(
                     f"SAFE CANDIDATE {scan.snapshot.symbol} {mint} | "
                     f"rank={scan.rank_score:.2f} organic={organic:.1f} holders={holders}",
                     flush=True,
                 )
                 return scan
+
             except LiveBotError as error:
-                print(f"Candidate validation error for {scan.snapshot.symbol}: {error}", flush=True)
+                rejected_until[mint] = time.time() + 900
+                self.state.save()
+                print(
+                    f"Candidate validation error for {scan.snapshot.symbol}: {error}",
+                    flush=True,
+                )
                 continue
-        return None
+
+        return None    
 
     def _execute_order(self, order: dict[str, Any]) -> dict[str, Any]:
         transaction = str(order.get("transaction") or "")
