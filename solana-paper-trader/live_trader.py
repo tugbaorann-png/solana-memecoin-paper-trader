@@ -566,16 +566,12 @@ class LiveTrader:
         }
         self.state.data["open_position"] = None
         self.state.save()
-        print(
+                 print(
             f"SELL SUCCESS {position['symbol']} | {reason} | realized={realized / 1e9:+.6f} SOL "
-            f"({realized / entry_sol * 100:+.2f}%) | signature={result.get('signature')}",
+            f"({realized / entry_sol * 100:+.2f}%) | signature={result.get('signature')} | "
+            f"SUMMARY Trades={completed} Wins={wins} Losses={losses} NetP/L={net_pnl / 1e9:+.6f} SOL",
             flush=True,
-        )
-       print(
-            f"SUMMARY | Trades: {completed} | Wins: {wins} | Losses: {losses} | "
-            f"Net P/L: {net_pnl / 1e9:+.6f} SOL",
-            flush=True,
-        )
+        )       
 
     def run(self) -> None:
         print("=" * 72, flush=True)
