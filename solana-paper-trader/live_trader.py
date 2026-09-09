@@ -46,7 +46,7 @@ class Config:
     min_holder_count: int = int(os.getenv("MIN_HOLDER_COUNT", "300"))
     max_top_holders_pct: float = float(os.getenv("MAX_TOP_HOLDERS_PCT", "60"))
     max_dev_balance_pct: float = float(os.getenv("MAX_DEV_BALANCE_PCT", "20"))
-    max_completed_round_trips: int = int(os.getenv("MAX_COMPLETED_ROUND_TRIPS", "1"))
+    max_completed_round_trips: int = int(os.getenv("MAX_COMPLETED_ROUND_TRIPS", "3"))
 
     @property
     def live_enabled(self) -> bool:
@@ -604,7 +604,7 @@ def main() -> int:
         raise SystemExit("Invalid position/reserve configuration")
     if config.take_profit_pct <= 0 or config.stop_loss_pct >= 0:
         raise SystemExit("TAKE_PROFIT_PCT must be positive and STOP_LOSS_PCT negative")
-    if config.max_completed_round_trips != 1:
+    if config.max_completed_round_trips != 3:
         raise SystemExit("This first-live package intentionally requires MAX_COMPLETED_ROUND_TRIPS=1")
     trader = LiveTrader(config)
     trader.run()
