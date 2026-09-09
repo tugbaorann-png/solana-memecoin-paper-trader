@@ -35,7 +35,7 @@ class FatalLiveBotError(LiveBotError):
 class Config:
     position_lamports: int = int(os.getenv("POSITION_LAMPORTS", "5000000"))  # 0.005 SOL
     reserve_lamports: int = int(os.getenv("RESERVE_LAMPORTS", "15000000"))  # 0.015 SOL
-    take_profit_pct: float = float(os.getenv("TAKE_PROFIT_PCT", "20"))
+    take_profit_pct: float = float(os.getenv("TAKE_PROFIT_PCT", "30"))
     stop_loss_pct: float = float(os.getenv("STOP_LOSS_PCT", "-10"))
     scan_interval_seconds: float = float(os.getenv("SCAN_INTERVAL_SECONDS", "60"))
     open_poll_seconds: float = float(os.getenv("OPEN_POLL_SECONDS", "2"))
