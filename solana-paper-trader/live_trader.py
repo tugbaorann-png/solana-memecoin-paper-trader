@@ -526,6 +526,13 @@ class LiveTrader:
             return
 
         order = self.jupiter.order(mint, SOL_MINT, amount, taker=self.wallet_address)
+        sell_impact = float(order.get("priceImpact") or 0)
+
+        print(
+    f"EXIT ORDER {position['symbol']} | reason={reason} | "
+    f"priceImpact={sell_impact:.2f}%",
+    flush=True,
+       )
         print(f"SELLING {position['symbol']} because {reason}", flush=True)
         result = self._execute_order(order)
         sol_received = self._amount(result, "outputAmountResult", "totalOutputAmount")
