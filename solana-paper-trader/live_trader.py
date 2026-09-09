@@ -543,6 +543,18 @@ class LiveTrader:
         realized = sol_received - entry_sol
         completed = int(self.state.data.get("completed_round_trips", 0)) + 1
         self.state.data["completed_round_trips"] = completed
+        wins = int(self.state.data.get("wins", 0))
+        losses = int(self.state.data.get("losses", 0))
+        net_pnl = int(self.state.data.get("net_realized_pnl_lamports", 0)) + realized
+
+        if realized > 0:
+            wins += 1
+        elif realized < 0:
+            losses += 1
+
+        self.state.data["wins"] = wins
+        self.state.data["losses"] = losses
+        self.state.data["net_realized_pnl_lamports"] = net_pnl
         self.state.data["last_trade"] = {
             **position,
             "closed_at": datetime.now(timezone.utc).isoformat(),
@@ -557,6 +569,11 @@ class LiveTrader:
         print(
             f"SELL SUCCESS {position['symbol']} | {reason} | realized={realized / 1e9:+.6f} SOL "
             f"({realized / entry_sol * 100:+.2f}%) | signature={result.get('signature')}",
+            flush=True,
+        )
+       print(
+            f"SUMMARY | Trades: {completed} | Wins: {wins} | Losses: {losses} | "
+            f"Net P/L: {net_pnl / 1e9:+.6f} SOL",
             flush=True,
         )
 
