@@ -38,7 +38,7 @@ class Config:
     take_profit_pct: float = float(os.getenv("TAKE_PROFIT_PCT", "20"))
     stop_loss_pct: float = float(os.getenv("STOP_LOSS_PCT", "-10"))
     scan_interval_seconds: float = float(os.getenv("SCAN_INTERVAL_SECONDS", "60"))
-    open_poll_seconds: float = float(os.getenv("OPEN_POLL_SECONDS", "10"))
+    open_poll_seconds: float = float(os.getenv("OPEN_POLL_SECONDS", "2"))
     scan_limit: int = int(os.getenv("SCAN_LIMIT", "20"))
     max_price_impact_pct: float = float(os.getenv("MAX_PRICE_IMPACT_PCT", "2.5"))
     min_roundtrip_return_pct: float = float(os.getenv("MIN_ROUNDTRIP_RETURN_PCT", "94"))
