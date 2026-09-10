@@ -33,16 +33,26 @@ class FatalLiveBotError(LiveBotError):
 class Config:
     position_lamports: int = int(os.getenv("POSITION_LAMPORTS", "5000000"))
     reserve_lamports: int = int(os.getenv("RESERVE_LAMPORTS", "15000000"))
-    take_profit_pct: float = float(os.getenv("TAKE_PROFIT_PCT", "20"))
-    stop_loss_pct: float = float(os.getenv("STOP_LOSS_PCT", "-10"))
+    # Fixed live exits requested for this test version.
+    take_profit_pct: float = 35.0
+    stop_loss_pct: float = -5.0
     scan_interval_seconds: float = float(os.getenv("SCAN_INTERVAL_SECONDS", "90"))
-    open_poll_seconds: float = float(os.getenv("OPEN_POLL_SECONDS", "10"))
+    # Check open positions at least every 5 seconds to reduce stop overshoot.
+    open_poll_seconds: float = min(float(os.getenv("OPEN_POLL_SECONDS", "5")), 5.0)
     scan_limit: int = int(os.getenv("SCAN_LIMIT", "20"))
     max_open_positions: int = int(os.getenv("MAX_OPEN_POSITIONS", "2"))
     max_completed_round_trips: int = int(os.getenv("MAX_COMPLETED_ROUND_TRIPS", "0"))
-    max_price_impact_pct: float = float(os.getenv("MAX_PRICE_IMPACT_PCT", "5"))
-    min_roundtrip_return_pct: float = float(os.getenv("MIN_ROUNDTRIP_RETURN_PCT", "90"))
+    # Real-money execution protection: never allow stale env vars to loosen these caps.
+    max_price_impact_pct: float = min(float(os.getenv("MAX_PRICE_IMPACT_PCT", "2.5")), 2.5)
+    min_roundtrip_return_pct: float = max(float(os.getenv("MIN_ROUNDTRIP_RETURN_PCT", "94")), 94.0)
     reject_cooldown_seconds: int = int(os.getenv("REJECT_COOLDOWN_SECONDS", "900"))
+    # Entry-quality gate: do not buy every token that merely passes the baseline scanner.
+    min_entry_rank: float = float(os.getenv("MIN_ENTRY_RANK", "15"))
+    max_entry_rank: float = float(os.getenv("MAX_ENTRY_RANK", "30"))
+    min_entry_buy_pressure_pct: float = float(os.getenv("MIN_ENTRY_BUY_PRESSURE_PCT", "10"))
+    confirmation_seconds: float = float(os.getenv("ENTRY_CONFIRMATION_SECONDS", "60"))
+    min_entry_price_change_5m_pct: float = float(os.getenv("MIN_ENTRY_PRICE_CHANGE_5M_PCT", "1"))
+    max_entry_price_change_5m_pct: float = float(os.getenv("MAX_ENTRY_PRICE_CHANGE_5M_PCT", "80"))
 
     @property
     def live_enabled(self) -> bool:
@@ -325,6 +335,9 @@ class LiveTrader:
             max_volume_to_liquidity_ratio=20,
         )
         self.state = StateStore(config.state_path)
+        # Candidate must pass the entry + execution gates twice, separated in time.
+        # This intentionally filters tokens that collapse immediately after first detection.
+        self._pending_confirmations: dict[str, float] = {}
 
     def _rpc(self, method: str, params: list[Any]) -> Any:
         payload = self.http.json(
@@ -410,6 +423,40 @@ class LiveTrader:
         for mint in expired:
             rejected_until.pop(mint, None)
 
+    def _entry_quality_reasons(self, scan: TokenScan) -> list[str]:
+        snapshot = scan.snapshot
+        reasons: list[str] = []
+
+        if scan.rank_score < self.config.min_entry_rank:
+            reasons.append(
+                f"rank_{scan.rank_score:.2f}_below_{self.config.min_entry_rank:.2f}"
+            )
+
+        if scan.rank_score > self.config.max_entry_rank:
+            reasons.append(
+                f"rank_{scan.rank_score:.2f}_above_{self.config.max_entry_rank:.2f}"
+            )
+
+        if snapshot.buy_pressure_pct < self.config.min_entry_buy_pressure_pct:
+            reasons.append(
+                f"buy_pressure_{snapshot.buy_pressure_pct:.1f}_below_"
+                f"{self.config.min_entry_buy_pressure_pct:.1f}"
+            )
+
+        if snapshot.price_change_5m_pct < self.config.min_entry_price_change_5m_pct:
+            reasons.append(
+                f"change5m_{snapshot.price_change_5m_pct:.1f}_below_"
+                f"{self.config.min_entry_price_change_5m_pct:.1f}"
+            )
+
+        if snapshot.price_change_5m_pct > self.config.max_entry_price_change_5m_pct:
+            reasons.append(
+                f"change5m_{snapshot.price_change_5m_pct:.1f}_above_"
+                f"{self.config.max_entry_price_change_5m_pct:.1f}"
+            )
+
+        return reasons
+
     def _scan_candidates(self) -> list[TokenScan]:
         result = self.scanner.scan(
             limit=self.config.scan_limit,
@@ -432,7 +479,21 @@ class LiveTrader:
 
             if float(rejected_until.get(mint, 0) or 0) > now:
                 print(
-                    f"SKIP {scan.snapshot.symbol} {mint}: execution check rejected recently",
+                    f"SKIP {scan.snapshot.symbol} {mint}: rejected recently",
+                    flush=True,
+                )
+                continue
+
+            quality_reasons = self._entry_quality_reasons(scan)
+            if quality_reasons:
+                self._pending_confirmations.pop(mint, None)
+                rejected_until[mint] = (
+                    time.time() + self.config.reject_cooldown_seconds
+                )
+                self.state.save()
+                print(
+                    f"SIGNAL REJECT {scan.snapshot.symbol} {mint}: "
+                    f"{', '.join(quality_reasons)}",
                     flush=True,
                 )
                 continue
@@ -440,6 +501,7 @@ class LiveTrader:
             try:
                 reasons = self._route_safety(mint)
             except LiveBotError as error:
+                self._pending_confirmations.pop(mint, None)
                 rejected_until[mint] = (
                     time.time() + self.config.reject_cooldown_seconds
                 )
@@ -451,6 +513,7 @@ class LiveTrader:
                 continue
 
             if reasons:
+                self._pending_confirmations.pop(mint, None)
                 rejected_until[mint] = (
                     time.time() + self.config.reject_cooldown_seconds
                 )
@@ -461,9 +524,31 @@ class LiveTrader:
                 )
                 continue
 
+            first_pass_at = self._pending_confirmations.get(mint)
+            if first_pass_at is None:
+                self._pending_confirmations[mint] = time.time()
+                print(
+                    f"CONFIRM WAIT {scan.snapshot.symbol} {mint} | "
+                    f"rank={scan.rank_score:.2f} | first clean pass",
+                    flush=True,
+                )
+                continue
+
+            confirmation_age = time.time() - first_pass_at
+            if confirmation_age < self.config.confirmation_seconds:
+                print(
+                    f"CONFIRM WAIT {scan.snapshot.symbol} {mint} | "
+                    f"{confirmation_age:.0f}s/"
+                    f"{self.config.confirmation_seconds:.0f}s",
+                    flush=True,
+                )
+                continue
+
+            self._pending_confirmations.pop(mint, None)
             print(
-                f"PAPER-STRATEGY CANDIDATE {scan.snapshot.symbol} {mint} | "
-                f"rank={scan.rank_score:.2f}",
+                f"CONFIRMED CANDIDATE {scan.snapshot.symbol} {mint} | "
+                f"rank={scan.rank_score:.2f} | "
+                f"confirmed_after={confirmation_age:.0f}s",
                 flush=True,
             )
             candidates.append(scan)
@@ -773,6 +858,24 @@ class LiveTrader:
             flush=True,
         )
         print(
+            f"Entry gate: rank={self.config.min_entry_rank:.1f}.."
+            f"{self.config.max_entry_rank:.1f}, "
+            f"buy pressure>={self.config.min_entry_buy_pressure_pct:.1f}%, "
+            f"5m change={self.config.min_entry_price_change_5m_pct:.1f}%.."
+            f"{self.config.max_entry_price_change_5m_pct:.1f}%",
+            flush=True,
+        )
+        print(
+            f"Execution gate: max impact={self.config.max_price_impact_pct:.1f}%, "
+            f"min roundtrip={self.config.min_roundtrip_return_pct:.1f}%",
+            flush=True,
+        )
+        print(
+            f"Confirmation gate: 2 clean scans, >="
+            f"{self.config.confirmation_seconds:.0f}s apart",
+            flush=True,
+        )
+        print(
             "Max completed round trips: "
             + (
                 "unlimited"
@@ -841,6 +944,12 @@ def main() -> int:
 
     if config.max_open_positions <= 0:
         raise SystemExit("MAX_OPEN_POSITIONS must be positive")
+
+    if config.min_entry_rank >= config.max_entry_rank:
+        raise SystemExit("MIN_ENTRY_RANK must be below MAX_ENTRY_RANK")
+
+    if config.confirmation_seconds < 0:
+        raise SystemExit("ENTRY_CONFIRMATION_SECONDS cannot be negative")
 
     if config.max_completed_round_trips < 0:
         raise SystemExit("MAX_COMPLETED_ROUND_TRIPS cannot be negative")
