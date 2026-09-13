@@ -48,9 +48,9 @@ class Config:
     reject_cooldown_seconds: int = int(os.getenv("REJECT_COOLDOWN_SECONDS", "900"))
     # Entry-quality gate: do not buy every token that merely passes the baseline scanner.
     min_entry_rank: float = float(os.getenv("MIN_ENTRY_RANK", "15"))
-    max_entry_rank: float = float(os.getenv("MAX_ENTRY_RANK", "30"))
+    max_entry_rank: float = float(os.getenv("MAX_ENTRY_RANK", "35"))
     min_entry_buy_pressure_pct: float = float(os.getenv("MIN_ENTRY_BUY_PRESSURE_PCT", "10"))
-    confirmation_seconds: float = float(os.getenv("ENTRY_CONFIRMATION_SECONDS", "60"))
+    confirmation_seconds: float = float(os.getenv("ENTRY_CONFIRMATION_SECONDS", "30"))
     min_entry_price_change_5m_pct: float = float(os.getenv("MIN_ENTRY_PRICE_CHANGE_5M_PCT", "1"))
     max_entry_price_change_5m_pct: float = float(os.getenv("MAX_ENTRY_PRICE_CHANGE_5M_PCT", "80"))
 
@@ -677,6 +677,11 @@ class LiveTrader:
         self.state.data["seen_mints"] = seen
         self.state.save()
 
+        print(
+            f"\033[92m🟢🟢🟢 BUY OPENED — {scan.snapshot.symbol} — "
+            f"{self.config.position_lamports / 1e9:.6f} SOL 🟢🟢🟢\033[0m",
+            flush=True,
+        )
         print(
             f"BUY SUCCESS {scan.snapshot.symbol} | "
             f"signature={result.get('signature')} | "
