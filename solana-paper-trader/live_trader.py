@@ -34,25 +34,32 @@ class Config:
     position_lamports: int = int(os.getenv("POSITION_LAMPORTS", "5000000"))
     reserve_lamports: int = int(os.getenv("RESERVE_LAMPORTS", "15000000"))
     # Fixed live exits requested for this test version.
-    take_profit_pct: float = 35.0
-    stop_loss_pct: float = -5.0
-    scan_interval_seconds: float = float(os.getenv("SCAN_INTERVAL_SECONDS", "90"))
+    take_profit_pct: float = 15.0
+    stop_loss_pct: float = -4.0
+    scan_interval_seconds: float = min(float(os.getenv("SCAN_INTERVAL_SECONDS", "15")), 15.0)
     # Check open positions at least every 5 seconds to reduce stop overshoot.
-    open_poll_seconds: float = min(float(os.getenv("OPEN_POLL_SECONDS", "5")), 5.0)
+    open_poll_seconds: float = min(float(os.getenv("OPEN_POLL_SECONDS", "1")), 1.0)
     scan_limit: int = int(os.getenv("SCAN_LIMIT", "20"))
-    max_open_positions: int = int(os.getenv("MAX_OPEN_POSITIONS", "2"))
+    max_open_positions: int = min(int(os.getenv("MAX_OPEN_POSITIONS", "1")), 1)
     max_completed_round_trips: int = int(os.getenv("MAX_COMPLETED_ROUND_TRIPS", "0"))
     # Real-money execution protection: never allow stale env vars to loosen these caps.
-    max_price_impact_pct: float = min(float(os.getenv("MAX_PRICE_IMPACT_PCT", "2.5")), 2.5)
-    min_roundtrip_return_pct: float = max(float(os.getenv("MIN_ROUNDTRIP_RETURN_PCT", "94")), 94.0)
+    max_price_impact_pct: float = min(float(os.getenv("MAX_PRICE_IMPACT_PCT", "1.0")), 1.0)
+    min_roundtrip_return_pct: float = max(float(os.getenv("MIN_ROUNDTRIP_RETURN_PCT", "97.5")), 97.5)
     reject_cooldown_seconds: int = int(os.getenv("REJECT_COOLDOWN_SECONDS", "900"))
     # Entry-quality gate: do not buy every token that merely passes the baseline scanner.
     min_entry_rank: float = float(os.getenv("MIN_ENTRY_RANK", "15"))
-    max_entry_rank: float = float(os.getenv("MAX_ENTRY_RANK", "40"))
-    min_entry_buy_pressure_pct: float = float(os.getenv("MIN_ENTRY_BUY_PRESSURE_PCT", "5"))
-    confirmation_seconds: float = float(os.getenv("ENTRY_CONFIRMATION_SECONDS", "20"))
-    min_entry_price_change_5m_pct: float = float(os.getenv("MIN_ENTRY_PRICE_CHANGE_5M_PCT", "1"))
-    max_entry_price_change_5m_pct: float = float(os.getenv("MAX_ENTRY_PRICE_CHANGE_5M_PCT", "80"))
+    max_entry_rank: float = float(os.getenv("MAX_ENTRY_RANK", "30"))
+    min_entry_buy_pressure_pct: float = float(os.getenv("MIN_ENTRY_BUY_PRESSURE_PCT", "10"))
+    confirmation_seconds: float = float(os.getenv("ENTRY_CONFIRMATION_SECONDS", "30"))
+    min_entry_price_change_5m_pct: float = float(os.getenv("MIN_ENTRY_PRICE_CHANGE_5M_PCT", "2"))
+    max_entry_price_change_5m_pct: float = float(os.getenv("MAX_ENTRY_PRICE_CHANGE_5M_PCT", "25"))
+    trailing_activation_pct: float = 8.0
+    trailing_distance_pct: float = 4.0
+    trailing_floor_pct: float = 3.0
+    max_hold_seconds: float = 600.0
+    min_holder_count: int = 200
+    min_organic_score: float = 20.0
+    max_top_holders_pct: float = 30.0
 
     @property
     def live_enabled(self) -> bool:
@@ -170,6 +177,15 @@ class JupiterClient:
         if not isinstance(payload, dict):
             raise LiveBotError("Jupiter returned an invalid execute response")
         return payload
+
+    def token_info(self, mint: str) -> dict[str, Any]:
+        payload = self._get("/tokens/v2/search", {"query": mint})
+        if not isinstance(payload, list):
+            raise LiveBotError("Jupiter returned invalid token metadata")
+        for item in payload:
+            if isinstance(item, dict) and str(item.get("id") or "") == mint:
+                return item
+        raise LiveBotError("Jupiter token metadata not found")
 
 
 class PrivySigner:
@@ -325,14 +341,14 @@ class LiveTrader:
 
         self.scanner = DexscreenerClient()
         self.scan_config = ScannerConfig(
-            min_liquidity_usd=25_000,
-            min_market_cap_usd=20_000,
-            min_token_age_minutes=15,
-            min_volume_5m_usd=1_000,
-            min_transactions_5m=5,
-            min_buys_5m=1,
+            min_liquidity_usd=75_000,
+            min_market_cap_usd=100_000,
+            min_token_age_minutes=20,
+            min_volume_5m_usd=5_000,
+            min_transactions_5m=15,
+            min_buys_5m=8,
             max_abs_price_change_5m_pct=250,
-            max_volume_to_liquidity_ratio=20,
+            max_volume_to_liquidity_ratio=8,
         )
         self.state = StateStore(config.state_path)
         # Candidate must pass the entry + execution gates twice, separated in time.
@@ -407,6 +423,57 @@ class LiveTrader:
             roundtrip_pct = sell_out / self.config.position_lamports * 100
             if roundtrip_pct < self.config.min_roundtrip_return_pct:
                 reasons.append(f"roundtrip_quote_{roundtrip_pct:.1f}_pct")
+
+        return reasons
+
+    def _token_safety_reasons(self, mint: str) -> list[str]:
+        info = self.jupiter.token_info(mint)
+        reasons: list[str] = []
+
+        if info.get("mintAuthority") not in (None, ""):
+            reasons.append("mint_authority_enabled")
+        if info.get("freezeAuthority") not in (None, ""):
+            reasons.append("freeze_authority_enabled")
+
+        audit = info.get("audit") if isinstance(info.get("audit"), dict) else {}
+        if audit.get("isSus") is True:
+            reasons.append("jupiter_suspicious")
+        if audit.get("mintAuthorityDisabled") is False:
+            reasons.append("mint_authority_not_disabled")
+        if audit.get("freezeAuthorityDisabled") is False:
+            reasons.append("freeze_authority_not_disabled")
+
+        holders = info.get("holderCount")
+        try:
+            holder_count = int(holders)
+        except (TypeError, ValueError):
+            holder_count = 0
+        if holder_count < self.config.min_holder_count:
+            reasons.append(
+                f"holders_{holder_count}_below_{self.config.min_holder_count}"
+            )
+
+        organic = info.get("organicScore")
+        try:
+            organic_score = float(organic)
+        except (TypeError, ValueError):
+            organic_score = 0.0
+        if organic_score < self.config.min_organic_score:
+            reasons.append(
+                f"organic_{organic_score:.1f}_below_{self.config.min_organic_score:.1f}"
+            )
+
+        top_holders = audit.get("topHoldersPercentage")
+        if top_holders is not None:
+            try:
+                top_holders_pct = float(top_holders)
+                if top_holders_pct > self.config.max_top_holders_pct:
+                    reasons.append(
+                        f"top_holders_{top_holders_pct:.1f}_above_"
+                        f"{self.config.max_top_holders_pct:.1f}"
+                    )
+            except (TypeError, ValueError):
+                reasons.append("invalid_top_holders_pct")
 
         return reasons
 
@@ -494,6 +561,33 @@ class LiveTrader:
                 print(
                     f"SIGNAL REJECT {scan.snapshot.symbol} {mint}: "
                     f"{', '.join(quality_reasons)}",
+                    flush=True,
+                )
+                continue
+
+            try:
+                safety_reasons = self._token_safety_reasons(mint)
+            except LiveBotError as error:
+                self._pending_confirmations.pop(mint, None)
+                rejected_until[mint] = (
+                    time.time() + self.config.reject_cooldown_seconds
+                )
+                self.state.save()
+                print(
+                    f"TOKEN SAFETY ERROR {scan.snapshot.symbol} {mint}: {error}",
+                    flush=True,
+                )
+                continue
+
+            if safety_reasons:
+                self._pending_confirmations.pop(mint, None)
+                rejected_until[mint] = (
+                    time.time() + self.config.reject_cooldown_seconds
+                )
+                self.state.save()
+                print(
+                    f"TOKEN SAFETY REJECT {scan.snapshot.symbol} {mint}: "
+                    f"{', '.join(safety_reasons)}",
                     flush=True,
                 )
                 continue
@@ -806,10 +900,35 @@ class LiveTrader:
                 continue
 
             pnl_pct = (executable_sol / entry_sol - 1) * 100
+            previous_peak = float(position.get("peak_pnl_pct", pnl_pct))
+            peak_pnl_pct = max(previous_peak, pnl_pct)
+
+            if peak_pnl_pct != previous_peak:
+                current = self._open_positions().get(mint)
+                if isinstance(current, dict):
+                    current["peak_pnl_pct"] = peak_pnl_pct
+                    self.state.save()
+
+            try:
+                opened_at = datetime.fromisoformat(
+                    str(position.get("opened_at", "")).replace("Z", "+00:00")
+                )
+                held_seconds = max(
+                    0.0,
+                    (datetime.now(timezone.utc) - opened_at).total_seconds(),
+                )
+            except (TypeError, ValueError):
+                held_seconds = 0.0
+
+            trailing_trigger = max(
+                self.config.trailing_floor_pct,
+                peak_pnl_pct - self.config.trailing_distance_pct,
+            )
 
             print(
                 f"OPEN {position['symbol']} | "
                 f"executable P/L={pnl_pct:+.2f}% | "
+                f"peak={peak_pnl_pct:+.2f}% | "
                 f"quote={executable_sol / 1e9:.6f} SOL",
                 flush=True,
             )
@@ -821,11 +940,28 @@ class LiveTrader:
                     "TAKE_PROFIT",
                     pnl_pct,
                 )
+            elif (
+                peak_pnl_pct >= self.config.trailing_activation_pct
+                and pnl_pct <= trailing_trigger
+            ):
+                self._close_position(
+                    mint,
+                    position,
+                    "TRAILING_PROFIT",
+                    pnl_pct,
+                )
             elif pnl_pct <= self.config.stop_loss_pct:
                 self._close_position(
                     mint,
                     position,
                     "STOP_LOSS",
+                    pnl_pct,
+                )
+            elif held_seconds >= self.config.max_hold_seconds and pnl_pct <= 0:
+                self._close_position(
+                    mint,
+                    position,
+                    "TIME_STOP",
                     pnl_pct,
                 )
 
@@ -856,6 +992,18 @@ class LiveTrader:
         print(
             f"TP/SL: +{self.config.take_profit_pct:.1f}% / "
             f"{self.config.stop_loss_pct:.1f}%",
+            flush=True,
+        )
+        print(
+            f"Trailing: activate +{self.config.trailing_activation_pct:.1f}%, "
+            f"distance {self.config.trailing_distance_pct:.1f}%, "
+            f"floor +{self.config.trailing_floor_pct:.1f}%",
+            flush=True,
+        )
+        print(
+            f"Token safety: holders>={self.config.min_holder_count}, "
+            f"organic>={self.config.min_organic_score:.1f}, "
+            f"top holders<={self.config.max_top_holders_pct:.1f}%",
             flush=True,
         )
         print(
