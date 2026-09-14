@@ -41,8 +41,8 @@ class Config:
     # Check open positions at least every 5 seconds to reduce stop overshoot.
     open_poll_seconds: float = min(float(os.getenv("OPEN_POLL_SECONDS", "1")), 1.0)
     scan_limit: int = min(int(os.getenv("SCAN_LIMIT", "50")), 50)
-    discovery_pages: int = 8
-    discovery_refresh_seconds: float = 30.0
+    discovery_pages: int = 5
+    discovery_refresh_seconds: float = 60.0
     discovery_min_pool_age_minutes: float = 5.0
     discovery_max_pool_age_minutes: float = 90.0
     max_open_positions: int = min(int(os.getenv("MAX_OPEN_POSITIONS", "1")), 1)
@@ -690,6 +690,8 @@ class LiveTrader:
         scans: list[TokenScan] = []
         evaluated = 0
         baseline_passed = 0
+        baseline_reason_counts: dict[str, int] = {}
+        near_misses: list[tuple[int, str, str]] = []
 
         for mint in discovered_mints:
             if evaluated >= self.config.scan_limit:
@@ -706,6 +708,18 @@ class LiveTrader:
                 continue
 
             baseline_reasons = self._baseline_reasons(snapshot)
+            for reason in baseline_reasons:
+                baseline_reason_counts[reason] = baseline_reason_counts.get(reason, 0) + 1
+
+            if baseline_reasons:
+                near_misses.append(
+                    (
+                        len(baseline_reasons),
+                        snapshot.symbol,
+                        ",".join(baseline_reasons),
+                    )
+                )
+
             momentum_score, liquidity_score, rank_score = self._rank_snapshot(snapshot)
 
             scan = TokenScan(
@@ -731,6 +745,29 @@ class LiveTrader:
             f"snapshots={len(scans)}, baseline_passed={baseline_passed}",
             flush=True,
         )
+        if baseline_reason_counts:
+            ordered_reasons = sorted(
+                baseline_reason_counts.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+            print(
+                "BASELINE REJECT SUMMARY: "
+                + " | ".join(f"{reason}={count}" for reason, count in ordered_reasons),
+                flush=True,
+            )
+
+        if near_misses:
+            near_misses.sort(key=lambda item: item[0])
+            preview = near_misses[:5]
+            print(
+                "BASELINE NEAR MISSES: "
+                + " | ".join(
+                    f"{symbol}[{reasons}]"
+                    for _, symbol, reasons in preview
+                ),
+                flush=True,
+            )
 
         self._cleanup_rejected_cache()
 
@@ -1181,7 +1218,7 @@ class LiveTrader:
     def run(self) -> None:
         print("=" * 72, flush=True)
         print(
-            "SOLANA LIVE BOT — V8 NEW-POOL DISCOVERY / STRICT EXECUTION",
+            "SOLANA LIVE BOT — V8.1 DISCOVERY DIAGNOSTICS / STRICT EXECUTION",
             flush=True,
         )
         print(f"Privy wallet: {self.wallet_address}", flush=True)
