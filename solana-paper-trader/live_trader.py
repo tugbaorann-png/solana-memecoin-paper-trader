@@ -348,7 +348,7 @@ class LiveTrader:
         self.scan_config = ScannerConfig(
             min_liquidity_usd=25_000,
             min_market_cap_usd=20_000,
-            min_token_age_minutes=10,
+            min_token_age_minutes=5,
             min_volume_5m_usd=1_000,
             min_transactions_5m=5,
             min_buys_5m=1,
@@ -1218,7 +1218,7 @@ class LiveTrader:
     def run(self) -> None:
         print("=" * 72, flush=True)
         print(
-            "SOLANA LIVE BOT — V8.1 DISCOVERY DIAGNOSTICS / STRICT EXECUTION",
+            "SOLANA LIVE BOT — V8.2 AGE-5M / STRICT EXECUTION",
             flush=True,
         )
         print(f"Privy wallet: {self.wallet_address}", flush=True)
@@ -1247,7 +1247,7 @@ class LiveTrader:
         )
         print(
             "Baseline scanner: liquidity>=$25k, market cap>=$20k, "
-            "age>=10m, 5m volume>=$1k, tx5m>=5, buys5m>=1",
+            "age>=5m, 5m volume>=$1k, tx5m>=5, buys5m>=1",
             flush=True,
         )
         print(
