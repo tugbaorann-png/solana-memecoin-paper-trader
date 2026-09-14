@@ -39,13 +39,13 @@ class Config:
     scan_interval_seconds: float = min(float(os.getenv("SCAN_INTERVAL_SECONDS", "15")), 15.0)
     # Check open positions at least every 5 seconds to reduce stop overshoot.
     open_poll_seconds: float = min(float(os.getenv("OPEN_POLL_SECONDS", "1")), 1.0)
-    scan_limit: int = int(os.getenv("SCAN_LIMIT", "20"))
+    scan_limit: int = min(int(os.getenv("SCAN_LIMIT", "50")), 50)
     max_open_positions: int = min(int(os.getenv("MAX_OPEN_POSITIONS", "1")), 1)
     max_completed_round_trips: int = int(os.getenv("MAX_COMPLETED_ROUND_TRIPS", "0"))
     # Real-money execution protection: never allow stale env vars to loosen these caps.
     max_price_impact_pct: float = min(float(os.getenv("MAX_PRICE_IMPACT_PCT", "1.0")), 1.0)
     min_roundtrip_return_pct: float = max(float(os.getenv("MIN_ROUNDTRIP_RETURN_PCT", "97.5")), 97.5)
-    reject_cooldown_seconds: int = int(os.getenv("REJECT_COOLDOWN_SECONDS", "300"))
+    reject_cooldown_seconds: int = int(os.getenv("REJECT_COOLDOWN_SECONDS", "120"))
     # Entry-quality gate: do not buy every token that merely passes the baseline scanner.
     min_entry_rank: float = float(os.getenv("MIN_ENTRY_RANK", "15"))
     max_entry_rank: float = float(os.getenv("MAX_ENTRY_RANK", "30"))
@@ -341,14 +341,14 @@ class LiveTrader:
 
         self.scanner = DexscreenerClient()
         self.scan_config = ScannerConfig(
-            min_liquidity_usd=40_000,
-            min_market_cap_usd=50_000,
-            min_token_age_minutes=15,
-            min_volume_5m_usd=2_000,
-            min_transactions_5m=8,
-            min_buys_5m=3,
+            min_liquidity_usd=25_000,
+            min_market_cap_usd=20_000,
+            min_token_age_minutes=10,
+            min_volume_5m_usd=1_000,
+            min_transactions_5m=5,
+            min_buys_5m=1,
             max_abs_price_change_5m_pct=250,
-            max_volume_to_liquidity_ratio=12,
+            max_volume_to_liquidity_ratio=20,
         )
         self.state = StateStore(config.state_path)
         # Candidate must pass the entry + execution gates twice, separated in time.
@@ -979,7 +979,7 @@ class LiveTrader:
     def run(self) -> None:
         print("=" * 72, flush=True)
         print(
-            "SOLANA LIVE BOT — PAPER STRATEGY ENTRY LOGIC",
+            "SOLANA LIVE BOT — V7 WIDE DISCOVERY / STRICT EXECUTION",
             flush=True,
         )
         print(f"Privy wallet: {self.wallet_address}", flush=True)
@@ -1007,8 +1007,13 @@ class LiveTrader:
             flush=True,
         )
         print(
-            "Baseline scanner: liquidity>=$40k, market cap>=$50k, "
-            "age>=15m, 5m volume>=$2k, tx5m>=8, buys5m>=3",
+            "Baseline scanner: liquidity>=$25k, market cap>=$20k, "
+            "age>=10m, 5m volume>=$1k, tx5m>=5, buys5m>=1",
+            flush=True,
+        )
+        print(
+            f"Candidate pool: up to {self.config.scan_limit} per scan, "
+            f"reject cooldown={self.config.reject_cooldown_seconds}s",
             flush=True,
         )
         print(
