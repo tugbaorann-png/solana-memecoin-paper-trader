@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import tempfile
 import time
@@ -40,6 +41,10 @@ class Config:
     # Check open positions at least every 5 seconds to reduce stop overshoot.
     open_poll_seconds: float = min(float(os.getenv("OPEN_POLL_SECONDS", "1")), 1.0)
     scan_limit: int = min(int(os.getenv("SCAN_LIMIT", "50")), 50)
+    discovery_pages: int = 8
+    discovery_refresh_seconds: float = 30.0
+    discovery_min_pool_age_minutes: float = 5.0
+    discovery_max_pool_age_minutes: float = 90.0
     max_open_positions: int = min(int(os.getenv("MAX_OPEN_POSITIONS", "1")), 1)
     max_completed_round_trips: int = int(os.getenv("MAX_COMPLETED_ROUND_TRIPS", "0"))
     # Real-money execution protection: never allow stale env vars to loosen these caps.
@@ -354,6 +359,8 @@ class LiveTrader:
         # Candidate must pass the entry + execution gates twice, separated in time.
         # This intentionally filters tokens that collapse immediately after first detection.
         self._pending_confirmations: dict[str, float] = {}
+        self._discovery_cache: list[str] = []
+        self._discovery_cache_at: float = 0.0
 
     def _rpc(self, method: str, params: list[Any]) -> Any:
         payload = self.http.json(
@@ -524,10 +531,205 @@ class LiveTrader:
 
         return reasons
 
+    @staticmethod
+    def _parse_iso8601(value: Any) -> datetime | None:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+
+    def _discover_new_pool_mints(self) -> list[str]:
+        now_mono = time.monotonic()
+        if (
+            self._discovery_cache
+            and now_mono - self._discovery_cache_at
+            < self.config.discovery_refresh_seconds
+        ):
+            return list(self._discovery_cache)
+
+        now = datetime.now(timezone.utc)
+        candidates: list[tuple[datetime, str]] = []
+        seen: set[str] = set()
+        page_errors = 0
+
+        for page in range(1, self.config.discovery_pages + 1):
+            url = (
+                "https://api.geckoterminal.com/api/v2/"
+                "networks/solana/new_pools"
+                f"?page={page}&include=base_token"
+            )
+            try:
+                payload = self.http.json("GET", url)
+            except LiveBotError as error:
+                page_errors += 1
+                print(
+                    f"DISCOVERY PAGE ERROR page={page}: {error}",
+                    flush=True,
+                )
+                continue
+
+            rows = payload.get("data", []) if isinstance(payload, dict) else []
+            if not isinstance(rows, list):
+                continue
+
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                attrs = row.get("attributes")
+                rels = row.get("relationships")
+                if not isinstance(attrs, dict) or not isinstance(rels, dict):
+                    continue
+
+                base_rel = rels.get("base_token")
+                if not isinstance(base_rel, dict):
+                    continue
+                base_data = base_rel.get("data")
+                if not isinstance(base_data, dict):
+                    continue
+
+                token_id = str(base_data.get("id") or "")
+                if token_id.startswith("solana_"):
+                    mint = token_id[len("solana_"):]
+                else:
+                    mint = token_id
+
+                if not mint or mint == SOL_MINT or mint in seen:
+                    continue
+
+                created = self._parse_iso8601(attrs.get("pool_created_at"))
+                if created is None:
+                    continue
+
+                age_minutes = max((now - created).total_seconds() / 60.0, 0.0)
+                if age_minutes < self.config.discovery_min_pool_age_minutes:
+                    continue
+                if age_minutes > self.config.discovery_max_pool_age_minutes:
+                    continue
+
+                seen.add(mint)
+                candidates.append((created, mint))
+
+        # Newest qualifying pools first.
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        mints = [mint for _, mint in candidates]
+
+        # If the keyless new-pool feed is temporarily unavailable, retain a small
+        # Dexscreener profile fallback so discovery does not go completely blind.
+        if not mints:
+            try:
+                profiles = self.scanner.latest_solana_profiles(self.config.scan_limit)
+                for profile in profiles:
+                    mint = str(profile.get("tokenAddress") or "").strip()
+                    if mint and mint != SOL_MINT and mint not in seen:
+                        seen.add(mint)
+                        mints.append(mint)
+            except MarketDataError as error:
+                print(f"DISCOVERY FALLBACK ERROR: {error}", flush=True)
+
+        self._discovery_cache = mints
+        self._discovery_cache_at = now_mono
+        print(
+            f"DISCOVERY V8: {len(mints)} unique Solana new-pool mints "
+            f"from {self.config.discovery_pages} GeckoTerminal pages "
+            f"(page_errors={page_errors})",
+            flush=True,
+        )
+        return list(mints)
+
+    def _baseline_reasons(self, snapshot: Any) -> list[str]:
+        reasons: list[str] = []
+        cfg = self.scan_config
+
+        if not snapshot.mint or snapshot.symbol == "UNKNOWN":
+            reasons.append("missing_token_identity")
+        if snapshot.price_usd <= 0:
+            reasons.append("invalid_price")
+        if snapshot.liquidity_usd < cfg.min_liquidity_usd:
+            reasons.append("low_liquidity")
+        if snapshot.market_cap_usd < cfg.min_market_cap_usd:
+            reasons.append("low_or_missing_market_cap")
+        if snapshot.token_age_minutes < cfg.min_token_age_minutes:
+            reasons.append("token_too_new")
+        if snapshot.volume_5m_usd < cfg.min_volume_5m_usd:
+            reasons.append("low_5m_volume")
+        if snapshot.transactions_5m < cfg.min_transactions_5m:
+            reasons.append("low_5m_activity")
+        if snapshot.buys_5m < cfg.min_buys_5m:
+            reasons.append("no_recent_buys")
+        if abs(snapshot.price_change_5m_pct) > cfg.max_abs_price_change_5m_pct:
+            reasons.append("extreme_5m_price_change")
+        if (
+            snapshot.liquidity_usd > 0
+            and snapshot.volume_5m_usd / snapshot.liquidity_usd
+            > cfg.max_volume_to_liquidity_ratio
+        ):
+            reasons.append("suspicious_volume_to_liquidity")
+        return reasons
+
+    @staticmethod
+    def _rank_snapshot(snapshot: Any) -> tuple[float, float, float]:
+        volume_intensity = (
+            min(snapshot.volume_5m_usd / snapshot.liquidity_usd, 1.0)
+            if snapshot.liquidity_usd > 0
+            else 0.0
+        )
+        momentum_score = (
+            snapshot.price_change_5m_pct
+            + max(snapshot.buy_pressure_pct, 0.0) * 0.25
+            + volume_intensity * 10.0
+        )
+        liquidity_score = math.log10(max(snapshot.liquidity_usd, 1.0))
+        rank_score = momentum_score * 0.75 + liquidity_score * 2.5
+        return momentum_score, liquidity_score, rank_score
+
     def _scan_candidates(self) -> list[TokenScan]:
-        result = self.scanner.scan(
-            limit=self.config.scan_limit,
-            config=self.scan_config,
+        discovered_mints = self._discover_new_pool_mints()
+
+        scans: list[TokenScan] = []
+        evaluated = 0
+        baseline_passed = 0
+
+        for mint in discovered_mints:
+            if evaluated >= self.config.scan_limit:
+                break
+            evaluated += 1
+
+            try:
+                snapshot = self.scanner.token_snapshot(mint)
+            except MarketDataError as error:
+                print(f"SNAPSHOT ERROR {mint}: {error}", flush=True)
+                continue
+
+            if snapshot is None:
+                continue
+
+            baseline_reasons = self._baseline_reasons(snapshot)
+            momentum_score, liquidity_score, rank_score = self._rank_snapshot(snapshot)
+
+            scan = TokenScan(
+                snapshot=snapshot,
+                passed_filters=not baseline_reasons,
+                rejection_reasons=tuple(baseline_reasons),
+                momentum_score=momentum_score,
+                liquidity_score=liquidity_score,
+                rank_score=rank_score,
+            )
+            scans.append(scan)
+            if not baseline_reasons:
+                baseline_passed += 1
+
+        eligible = sorted(
+            (item for item in scans if item.passed_filters),
+            key=lambda item: item.rank_score,
+            reverse=True,
+        )
+
+        print(
+            f"DISCOVERY V8 SNAPSHOTS: evaluated={evaluated}, "
+            f"snapshots={len(scans)}, baseline_passed={baseline_passed}",
+            flush=True,
         )
 
         self._cleanup_rejected_cache()
@@ -538,7 +740,7 @@ class LiveTrader:
         now = time.time()
         candidates: list[TokenScan] = []
 
-        for scan in result.eligible:
+        for scan in eligible:
             mint = scan.snapshot.mint
 
             if mint in open_positions or mint in seen:
@@ -979,7 +1181,7 @@ class LiveTrader:
     def run(self) -> None:
         print("=" * 72, flush=True)
         print(
-            "SOLANA LIVE BOT — V7 WIDE DISCOVERY / STRICT EXECUTION",
+            "SOLANA LIVE BOT — V8 NEW-POOL DISCOVERY / STRICT EXECUTION",
             flush=True,
         )
         print(f"Privy wallet: {self.wallet_address}", flush=True)
@@ -1014,6 +1216,14 @@ class LiveTrader:
         print(
             f"Candidate pool: up to {self.config.scan_limit} per scan, "
             f"reject cooldown={self.config.reject_cooldown_seconds}s",
+            flush=True,
+        )
+        print(
+            f"Discovery V8: GeckoTerminal Solana new_pools, "
+            f"pages=1..{self.config.discovery_pages}, "
+            f"pool age={self.config.discovery_min_pool_age_minutes:.0f}.."
+            f"{self.config.discovery_max_pool_age_minutes:.0f}m, "
+            f"refresh={self.config.discovery_refresh_seconds:.0f}s",
             flush=True,
         )
         print(
@@ -1068,7 +1278,7 @@ class LiveTrader:
 
             except MarketDataError as error:
                 print(
-                    f"Dexscreener error: {error}; retrying.",
+                    f"Market-data error: {error}; retrying.",
                     flush=True,
                 )
                 time.sleep(
