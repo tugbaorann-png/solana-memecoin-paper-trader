@@ -50,13 +50,13 @@ class Config:
     # Real-money execution protection: never allow stale env vars to loosen these caps.
     max_price_impact_pct: float = min(float(os.getenv("MAX_PRICE_IMPACT_PCT", "1.0")), 1.0)
     min_roundtrip_return_pct: float = max(float(os.getenv("MIN_ROUNDTRIP_RETURN_PCT", "97.5")), 97.5)
-    reject_cooldown_seconds: int = int(os.getenv("REJECT_COOLDOWN_SECONDS", "120"))
+    reject_cooldown_seconds: int = int(os.getenv("REJECT_COOLDOWN_SECONDS", "60"))
     # Entry-quality gate: do not buy every token that merely passes the baseline scanner.
-    min_entry_rank: float = float(os.getenv("MIN_ENTRY_RANK", "15"))
-    max_entry_rank: float = float(os.getenv("MAX_ENTRY_RANK", "30"))
-    min_entry_buy_pressure_pct: float = float(os.getenv("MIN_ENTRY_BUY_PRESSURE_PCT", "10"))
-    confirmation_seconds: float = float(os.getenv("ENTRY_CONFIRMATION_SECONDS", "30"))
-    min_entry_price_change_5m_pct: float = float(os.getenv("MIN_ENTRY_PRICE_CHANGE_5M_PCT", "2"))
+    min_entry_rank: float = float(os.getenv("MIN_ENTRY_RANK", "10"))
+    max_entry_rank: float = float(os.getenv("MAX_ENTRY_RANK", "40"))
+    min_entry_buy_pressure_pct: float = float(os.getenv("MIN_ENTRY_BUY_PRESSURE_PCT", "5"))
+    confirmation_seconds: float = float(os.getenv("ENTRY_CONFIRMATION_SECONDS", "15"))
+    min_entry_price_change_5m_pct: float = float(os.getenv("MIN_ENTRY_PRICE_CHANGE_5M_PCT", "1"))
     max_entry_price_change_5m_pct: float = float(os.getenv("MAX_ENTRY_PRICE_CHANGE_5M_PCT", "25"))
     trailing_activation_pct: float = 8.0
     trailing_distance_pct: float = 4.0
@@ -741,7 +741,7 @@ class LiveTrader:
         )
 
         print(
-            f"DISCOVERY V8 SNAPSHOTS: evaluated={evaluated}, "
+            f"DISCOVERY V9 SNAPSHOTS: evaluated={evaluated}, "
             f"snapshots={len(scans)}, baseline_passed={baseline_passed}",
             flush=True,
         )
@@ -777,13 +777,23 @@ class LiveTrader:
         now = time.time()
         candidates: list[TokenScan] = []
 
+        pipeline_signal_pass = 0
+        pipeline_token_safety_pass = 0
+        pipeline_execution_pass = 0
+        pipeline_confirm_wait = 0
+        pipeline_confirmed = 0
+        pipeline_seen_or_open = 0
+        pipeline_cooldown = 0
+
         for scan in eligible:
             mint = scan.snapshot.mint
 
             if mint in open_positions or mint in seen:
+                pipeline_seen_or_open += 1
                 continue
 
             if float(rejected_until.get(mint, 0) or 0) > now:
+                pipeline_cooldown += 1
                 print(
                     f"SKIP {scan.snapshot.symbol} {mint}: rejected recently",
                     flush=True,
@@ -803,6 +813,8 @@ class LiveTrader:
                     flush=True,
                 )
                 continue
+
+            pipeline_signal_pass += 1
 
             try:
                 safety_reasons = self._token_safety_reasons(mint)
@@ -831,6 +843,8 @@ class LiveTrader:
                 )
                 continue
 
+            pipeline_token_safety_pass += 1
+
             try:
                 reasons = self._route_safety(mint)
             except LiveBotError as error:
@@ -857,8 +871,11 @@ class LiveTrader:
                 )
                 continue
 
+            pipeline_execution_pass += 1
+
             first_pass_at = self._pending_confirmations.get(mint)
             if first_pass_at is None:
+                pipeline_confirm_wait += 1
                 self._pending_confirmations[mint] = time.time()
                 print(
                     f"CONFIRM WAIT {scan.snapshot.symbol} {mint} | "
@@ -869,6 +886,7 @@ class LiveTrader:
 
             confirmation_age = time.time() - first_pass_at
             if confirmation_age < self.config.confirmation_seconds:
+                pipeline_confirm_wait += 1
                 print(
                     f"CONFIRM WAIT {scan.snapshot.symbol} {mint} | "
                     f"{confirmation_age:.0f}s/"
@@ -884,7 +902,23 @@ class LiveTrader:
                 f"confirmed_after={confirmation_age:.0f}s",
                 flush=True,
             )
+            pipeline_confirmed += 1
             candidates.append(scan)
+
+        print(
+            "PIPELINE V9: "
+            f"discovered={len(discovered_mints)} | "
+            f"snapshots={len(scans)} | "
+            f"baseline={len(eligible)} | "
+            f"signal={pipeline_signal_pass} | "
+            f"token_safety={pipeline_token_safety_pass} | "
+            f"execution={pipeline_execution_pass} | "
+            f"confirm_wait={pipeline_confirm_wait} | "
+            f"confirmed={pipeline_confirmed} | "
+            f"cooldown={pipeline_cooldown} | "
+            f"seen_or_open={pipeline_seen_or_open}",
+            flush=True,
+        )
 
         return candidates
 
@@ -1218,7 +1252,7 @@ class LiveTrader:
     def run(self) -> None:
         print("=" * 72, flush=True)
         print(
-            "SOLANA LIVE BOT — V8.2 AGE-5M / STRICT EXECUTION",
+            "SOLANA LIVE BOT — V9 HIGH-FLOW SIGNAL / STRICT EXECUTION",
             flush=True,
         )
         print(f"Privy wallet: {self.wallet_address}", flush=True)
