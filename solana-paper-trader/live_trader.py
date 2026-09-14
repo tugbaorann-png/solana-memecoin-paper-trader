@@ -45,7 +45,7 @@ class Config:
     # Real-money execution protection: never allow stale env vars to loosen these caps.
     max_price_impact_pct: float = min(float(os.getenv("MAX_PRICE_IMPACT_PCT", "1.0")), 1.0)
     min_roundtrip_return_pct: float = max(float(os.getenv("MIN_ROUNDTRIP_RETURN_PCT", "97.5")), 97.5)
-    reject_cooldown_seconds: int = int(os.getenv("REJECT_COOLDOWN_SECONDS", "900"))
+    reject_cooldown_seconds: int = int(os.getenv("REJECT_COOLDOWN_SECONDS", "300"))
     # Entry-quality gate: do not buy every token that merely passes the baseline scanner.
     min_entry_rank: float = float(os.getenv("MIN_ENTRY_RANK", "15"))
     max_entry_rank: float = float(os.getenv("MAX_ENTRY_RANK", "30"))
@@ -341,14 +341,14 @@ class LiveTrader:
 
         self.scanner = DexscreenerClient()
         self.scan_config = ScannerConfig(
-            min_liquidity_usd=75_000,
-            min_market_cap_usd=100_000,
-            min_token_age_minutes=20,
-            min_volume_5m_usd=5_000,
-            min_transactions_5m=15,
-            min_buys_5m=8,
+            min_liquidity_usd=40_000,
+            min_market_cap_usd=50_000,
+            min_token_age_minutes=15,
+            min_volume_5m_usd=2_000,
+            min_transactions_5m=8,
+            min_buys_5m=3,
             max_abs_price_change_5m_pct=250,
-            max_volume_to_liquidity_ratio=8,
+            max_volume_to_liquidity_ratio=12,
         )
         self.state = StateStore(config.state_path)
         # Candidate must pass the entry + execution gates twice, separated in time.
@@ -1004,6 +1004,11 @@ class LiveTrader:
             f"Token safety: holders>={self.config.min_holder_count}, "
             f"organic>={self.config.min_organic_score:.1f}, "
             f"top holders<={self.config.max_top_holders_pct:.1f}%",
+            flush=True,
+        )
+        print(
+            "Baseline scanner: liquidity>=$40k, market cap>=$50k, "
+            "age>=15m, 5m volume>=$2k, tx5m>=8, buys5m>=3",
             flush=True,
         )
         print(
