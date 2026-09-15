@@ -35,8 +35,8 @@ class Config:
     position_lamports: int = int(os.getenv("POSITION_LAMPORTS", "5000000"))
     reserve_lamports: int = int(os.getenv("RESERVE_LAMPORTS", "15000000"))
     # Fixed live exits requested for this test version.
-    take_profit_pct: float = 15.0
-    stop_loss_pct: float = -4.0
+    take_profit_pct: float = 30.0
+    stop_loss_pct: float = -5.0
     scan_interval_seconds: float = min(float(os.getenv("SCAN_INTERVAL_SECONDS", "15")), 15.0)
     # Check open positions at least every 5 seconds to reduce stop overshoot.
     open_poll_seconds: float = min(float(os.getenv("OPEN_POLL_SECONDS", "1")), 1.0)
@@ -45,7 +45,7 @@ class Config:
     discovery_refresh_seconds: float = 60.0
     discovery_min_pool_age_minutes: float = 5.0
     discovery_max_pool_age_minutes: float = 90.0
-    max_open_positions: int = min(int(os.getenv("MAX_OPEN_POSITIONS", "1")), 1)
+    max_open_positions: int = min(int(os.getenv("MAX_OPEN_POSITIONS", "3")), 3)
     max_completed_round_trips: int = int(os.getenv("MAX_COMPLETED_ROUND_TRIPS", "0"))
     # Real-money execution protection: never allow stale env vars to loosen these caps.
     max_price_impact_pct: float = min(float(os.getenv("MAX_PRICE_IMPACT_PCT", "1.0")), 1.0)
@@ -1193,11 +1193,6 @@ class LiveTrader:
             except (TypeError, ValueError):
                 held_seconds = 0.0
 
-            trailing_trigger = max(
-                self.config.trailing_floor_pct,
-                peak_pnl_pct - self.config.trailing_distance_pct,
-            )
-
             print(
                 f"OPEN {position['symbol']} | "
                 f"executable P/L={pnl_pct:+.2f}% | "
@@ -1211,16 +1206,6 @@ class LiveTrader:
                     mint,
                     position,
                     "TAKE_PROFIT",
-                    pnl_pct,
-                )
-            elif (
-                peak_pnl_pct >= self.config.trailing_activation_pct
-                and pnl_pct <= trailing_trigger
-            ):
-                self._close_position(
-                    mint,
-                    position,
-                    "TRAILING_PROFIT",
                     pnl_pct,
                 )
             elif pnl_pct <= self.config.stop_loss_pct:
@@ -1265,12 +1250,6 @@ class LiveTrader:
         print(
             f"TP/SL: +{self.config.take_profit_pct:.1f}% / "
             f"{self.config.stop_loss_pct:.1f}%",
-            flush=True,
-        )
-        print(
-            f"Trailing: activate +{self.config.trailing_activation_pct:.1f}%, "
-            f"distance {self.config.trailing_distance_pct:.1f}%, "
-            f"floor +{self.config.trailing_floor_pct:.1f}%",
             flush=True,
         )
         print(
