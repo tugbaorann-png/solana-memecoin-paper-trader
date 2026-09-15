@@ -52,12 +52,12 @@ class Config:
     min_roundtrip_return_pct: float = max(float(os.getenv("MIN_ROUNDTRIP_RETURN_PCT", "97.5")), 97.5)
     reject_cooldown_seconds: int = int(os.getenv("REJECT_COOLDOWN_SECONDS", "60"))
     # Entry-quality gate: do not buy every token that merely passes the baseline scanner.
-    min_entry_rank: float = float(os.getenv("MIN_ENTRY_RANK", "10"))
-    max_entry_rank: float = float(os.getenv("MAX_ENTRY_RANK", "40"))
-    min_entry_buy_pressure_pct: float = float(os.getenv("MIN_ENTRY_BUY_PRESSURE_PCT", "5"))
+    min_entry_rank: float = float(os.getenv("MIN_ENTRY_RANK", "5"))
+    max_entry_rank: float = float(os.getenv("MAX_ENTRY_RANK", "60"))
+    min_entry_buy_pressure_pct: float = float(os.getenv("MIN_ENTRY_BUY_PRESSURE_PCT", "2"))
     confirmation_seconds: float = float(os.getenv("ENTRY_CONFIRMATION_SECONDS", "15"))
-    min_entry_price_change_5m_pct: float = float(os.getenv("MIN_ENTRY_PRICE_CHANGE_5M_PCT", "1"))
-    max_entry_price_change_5m_pct: float = float(os.getenv("MAX_ENTRY_PRICE_CHANGE_5M_PCT", "25"))
+    min_entry_price_change_5m_pct: float = float(os.getenv("MIN_ENTRY_PRICE_CHANGE_5M_PCT", "0.5"))
+    max_entry_price_change_5m_pct: float = float(os.getenv("MAX_ENTRY_PRICE_CHANGE_5M_PCT", "40"))
     trailing_activation_pct: float = 8.0
     trailing_distance_pct: float = 4.0
     trailing_floor_pct: float = 3.0
@@ -346,11 +346,11 @@ class LiveTrader:
 
         self.scanner = DexscreenerClient()
         self.scan_config = ScannerConfig(
-            min_liquidity_usd=25_000,
-            min_market_cap_usd=20_000,
+            min_liquidity_usd=8_000,
+            min_market_cap_usd=8_000,
             min_token_age_minutes=5,
-            min_volume_5m_usd=1_000,
-            min_transactions_5m=5,
+            min_volume_5m_usd=400,
+            min_transactions_5m=3,
             min_buys_5m=1,
             max_abs_price_change_5m_pct=250,
             max_volume_to_liquidity_ratio=20,
@@ -1259,8 +1259,8 @@ class LiveTrader:
             flush=True,
         )
         print(
-            "Baseline scanner: liquidity>=$25k, market cap>=$20k, "
-            "age>=5m, 5m volume>=$1k, tx5m>=5, buys5m>=1",
+            "Baseline scanner: liquidity>=$8k, market cap>=$8k, "
+            "age>=5m, 5m volume>=$400, tx5m>=3, buys5m>=1",
             flush=True,
         )
         print(
