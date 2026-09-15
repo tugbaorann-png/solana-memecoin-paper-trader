@@ -48,8 +48,8 @@ class Config:
     max_open_positions: int = min(int(os.getenv("MAX_OPEN_POSITIONS", "3")), 3)
     max_completed_round_trips: int = int(os.getenv("MAX_COMPLETED_ROUND_TRIPS", "0"))
     # Real-money execution protection: never allow stale env vars to loosen these caps.
-    max_price_impact_pct: float = min(float(os.getenv("MAX_PRICE_IMPACT_PCT", "1.0")), 1.0)
-    min_roundtrip_return_pct: float = max(float(os.getenv("MIN_ROUNDTRIP_RETURN_PCT", "97.5")), 97.5)
+    max_price_impact_pct: float = min(float(os.getenv("MAX_PRICE_IMPACT_PCT", "3.0")), 3.0)
+    min_roundtrip_return_pct: float = max(float(os.getenv("MIN_ROUNDTRIP_RETURN_PCT", "95.0")), 95.0)
     reject_cooldown_seconds: int = int(os.getenv("REJECT_COOLDOWN_SECONDS", "60"))
     # Entry-quality gate: do not buy every token that merely passes the baseline scanner.
     min_entry_rank: float = float(os.getenv("MIN_ENTRY_RANK", "5"))
