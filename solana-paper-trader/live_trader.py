@@ -43,7 +43,7 @@ class Config:
     scan_limit: int = min(int(os.getenv("SCAN_LIMIT", "50")), 50)
     discovery_pages: int = 5
     discovery_refresh_seconds: float = 60.0
-    discovery_min_pool_age_minutes: float = 5.0
+    discovery_min_pool_age_minutes: float = 15.0
     discovery_max_pool_age_minutes: float = 90.0
     max_open_positions: int = min(int(os.getenv("MAX_OPEN_POSITIONS", "3")), 3)
     max_completed_round_trips: int = int(os.getenv("MAX_COMPLETED_ROUND_TRIPS", "0"))
