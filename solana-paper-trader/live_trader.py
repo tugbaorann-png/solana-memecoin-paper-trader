@@ -35,7 +35,7 @@ class Config:
     position_lamports: int = int(os.getenv("POSITION_LAMPORTS", "5000000"))
     reserve_lamports: int = int(os.getenv("RESERVE_LAMPORTS", "15000000"))
     # Fixed live exits requested for this test version.
-    take_profit_pct: float = 30.0
+    take_profit_pct: float = 18.0
     stop_loss_pct: float = -5.0
     scan_interval_seconds: float = min(float(os.getenv("SCAN_INTERVAL_SECONDS", "15")), 15.0)
     # Check open positions at least every 5 seconds to reduce stop overshoot.
@@ -49,6 +49,12 @@ class Config:
     max_completed_round_trips: int = int(os.getenv("MAX_COMPLETED_ROUND_TRIPS", "0"))
     # Real-money execution protection: never allow stale env vars to loosen these caps.
     max_price_impact_pct: float = min(float(os.getenv("MAX_PRICE_IMPACT_PCT", "1.5")), 1.5)
+    # Exit-side slippage cap: separate (looser) from the entry cap because a
+    # position MUST eventually be closed, but we still refuse to eat a wildly
+    # bad quote — we retry a few times first, then force through so a crashing
+    # token can't be held forever.
+    exit_max_price_impact_pct: float = 5.0
+    exit_force_after_skips: int = 5
     min_roundtrip_return_pct: float = max(float(os.getenv("MIN_ROUNDTRIP_RETURN_PCT", "96.5")), 96.5)
     reject_cooldown_seconds: int = int(os.getenv("REJECT_COOLDOWN_SECONDS", "60"))
     # Entry-quality gate: do not buy every token that merely passes the baseline scanner.
@@ -1081,6 +1087,30 @@ class LiveTrader:
             amount,
             taker=self.wallet_address,
         )
+
+        exit_impact = float(order.get("priceImpact") or 0)
+        skip_count = int(position.get("exit_skip_count", 0))
+
+        if (
+            abs(exit_impact) > self.config.exit_max_price_impact_pct
+            and skip_count < self.config.exit_force_after_skips
+        ):
+            position["exit_skip_count"] = skip_count + 1
+            self.state.save()
+            print(
+                f"EXIT SLIPPAGE TOO HIGH {position['symbol']}: "
+                f"{exit_impact:.2f}% exceeds {self.config.exit_max_price_impact_pct:.2f}% "
+                f"(retry {skip_count + 1}/{self.config.exit_force_after_skips}), holding.",
+                flush=True,
+            )
+            return
+
+        if skip_count >= self.config.exit_force_after_skips and abs(exit_impact) > self.config.exit_max_price_impact_pct:
+            print(
+                f"EXIT FORCED {position['symbol']}: slippage still {exit_impact:.2f}% "
+                f"after {skip_count} retries, selling anyway to avoid indefinite exposure.",
+                flush=True,
+            )
 
         print(
             f"SELLING {position['symbol']} because {reason}",
