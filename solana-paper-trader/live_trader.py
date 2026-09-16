@@ -69,7 +69,7 @@ class Config:
     trailing_floor_pct: float = 3.0
     max_hold_seconds: float = 600.0
     min_holder_count: int = 200
-    min_organic_score: float = 10.0
+    min_organic_score: float = 0.0
     max_top_holders_pct: float = 30.0
 
     @property
