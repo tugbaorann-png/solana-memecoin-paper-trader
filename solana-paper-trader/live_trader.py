@@ -48,22 +48,22 @@ class Config:
     max_open_positions: int = min(int(os.getenv("MAX_OPEN_POSITIONS", "3")), 3)
     max_completed_round_trips: int = int(os.getenv("MAX_COMPLETED_ROUND_TRIPS", "0"))
     # Real-money execution protection: never allow stale env vars to loosen these caps.
-    max_price_impact_pct: float = min(float(os.getenv("MAX_PRICE_IMPACT_PCT", "3.0")), 3.0)
-    min_roundtrip_return_pct: float = max(float(os.getenv("MIN_ROUNDTRIP_RETURN_PCT", "95.0")), 95.0)
+    max_price_impact_pct: float = min(float(os.getenv("MAX_PRICE_IMPACT_PCT", "1.5")), 1.5)
+    min_roundtrip_return_pct: float = max(float(os.getenv("MIN_ROUNDTRIP_RETURN_PCT", "96.5")), 96.5)
     reject_cooldown_seconds: int = int(os.getenv("REJECT_COOLDOWN_SECONDS", "60"))
     # Entry-quality gate: do not buy every token that merely passes the baseline scanner.
     min_entry_rank: float = float(os.getenv("MIN_ENTRY_RANK", "5"))
     max_entry_rank: float = float(os.getenv("MAX_ENTRY_RANK", "60"))
     min_entry_buy_pressure_pct: float = float(os.getenv("MIN_ENTRY_BUY_PRESSURE_PCT", "2"))
     confirmation_seconds: float = float(os.getenv("ENTRY_CONFIRMATION_SECONDS", "15"))
-    min_entry_price_change_5m_pct: float = float(os.getenv("MIN_ENTRY_PRICE_CHANGE_5M_PCT", "0.5"))
+    min_entry_price_change_5m_pct: float = float(os.getenv("MIN_ENTRY_PRICE_CHANGE_5M_PCT", "1.5"))
     max_entry_price_change_5m_pct: float = float(os.getenv("MAX_ENTRY_PRICE_CHANGE_5M_PCT", "40"))
     trailing_activation_pct: float = 8.0
     trailing_distance_pct: float = 4.0
     trailing_floor_pct: float = 3.0
     max_hold_seconds: float = 600.0
     min_holder_count: int = 200
-    min_organic_score: float = 0.0
+    min_organic_score: float = 10.0
     max_top_holders_pct: float = 30.0
 
     @property
@@ -346,8 +346,8 @@ class LiveTrader:
 
         self.scanner = DexscreenerClient()
         self.scan_config = ScannerConfig(
-            min_liquidity_usd=8_000,
-            min_market_cap_usd=8_000,
+            min_liquidity_usd=15_000,
+            min_market_cap_usd=12_000,
             min_token_age_minutes=5,
             min_volume_5m_usd=400,
             min_transactions_5m=3,
@@ -1133,8 +1133,9 @@ class LiveTrader:
         self._open_positions().pop(mint, None)
         self.state.save()
 
+        result_emoji = "✅" if realized > 0 else "❌"
         print(
-            f"SELL SUCCESS {position['symbol']} | {reason} | "
+            f"{result_emoji} SELL SUCCESS {position['symbol']} | {reason} | "
             f"realized={realized / 1e9:+.6f} SOL "
             f"({realized / entry_sol * 100:+.2f}%) | "
             f"signature={result.get('signature')} | "
@@ -1259,7 +1260,7 @@ class LiveTrader:
             flush=True,
         )
         print(
-            "Baseline scanner: liquidity>=$8k, market cap>=$8k, "
+            "Baseline scanner: liquidity>=$15k, market cap>=$12k, "
             "age>=5m, 5m volume>=$400, tx5m>=3, buys5m>=1",
             flush=True,
         )
