@@ -37,6 +37,12 @@ class Config:
     # Fixed live exits requested for this test version.
     take_profit_pct: float = 18.0
     stop_loss_pct: float = -5.0
+    # Rug-pull circuit breaker: if a position's value collapses far beyond
+    # the normal stop-loss (dev dumping / liquidity pulled), we bypass the
+    # exit slippage retry loop entirely and sell immediately at whatever
+    # price is available — waiting during a real liquidity drain only makes
+    # the outcome worse, it never recovers like a stale quote would.
+    rug_catastrophic_loss_pct: float = -40.0
     scan_interval_seconds: float = min(float(os.getenv("SCAN_INTERVAL_SECONDS", "15")), 15.0)
     # Check open positions at least every 5 seconds to reduce stop overshoot.
     open_poll_seconds: float = min(float(os.getenv("OPEN_POLL_SECONDS", "1")), 1.0)
@@ -1090,9 +1096,11 @@ class LiveTrader:
 
         exit_impact = float(order.get("priceImpact") or 0)
         skip_count = int(position.get("exit_skip_count", 0))
+        is_rug_protection = reason == "RUG_PROTECTION"
 
         if (
-            abs(exit_impact) > self.config.exit_max_price_impact_pct
+            not is_rug_protection
+            and abs(exit_impact) > self.config.exit_max_price_impact_pct
             and skip_count < self.config.exit_force_after_skips
         ):
             position["exit_skip_count"] = skip_count + 1
@@ -1105,7 +1113,14 @@ class LiveTrader:
             )
             return
 
-        if skip_count >= self.config.exit_force_after_skips and abs(exit_impact) > self.config.exit_max_price_impact_pct:
+        if is_rug_protection:
+            print(
+                f"🚨 RUG PROTECTION {position['symbol']}: catastrophic drop detected "
+                f"({pnl_pct:+.2f}%), selling immediately at best available price "
+                f"(impact={exit_impact:.2f}%), skipping normal slippage retry.",
+                flush=True,
+            )
+        elif skip_count >= self.config.exit_force_after_skips and abs(exit_impact) > self.config.exit_max_price_impact_pct:
             print(
                 f"EXIT FORCED {position['symbol']}: slippage still {exit_impact:.2f}% "
                 f"after {skip_count} retries, selling anyway to avoid indefinite exposure.",
@@ -1232,7 +1247,14 @@ class LiveTrader:
                 flush=True,
             )
 
-            if pnl_pct >= self.config.take_profit_pct:
+            if pnl_pct <= self.config.rug_catastrophic_loss_pct:
+                self._close_position(
+                    mint,
+                    position,
+                    "RUG_PROTECTION",
+                    pnl_pct,
+                )
+            elif pnl_pct >= self.config.take_profit_pct:
                 self._close_position(
                     mint,
                     position,
@@ -1281,6 +1303,12 @@ class LiveTrader:
         print(
             f"TP/SL: +{self.config.take_profit_pct:.1f}% / "
             f"{self.config.stop_loss_pct:.1f}%",
+            flush=True,
+        )
+        print(
+            f"🚨 Rug protection: force-sell immediately if a position drops "
+            f"to {self.config.rug_catastrophic_loss_pct:.1f}% (bypasses normal "
+            f"exit slippage retries)",
             flush=True,
         )
         print(
