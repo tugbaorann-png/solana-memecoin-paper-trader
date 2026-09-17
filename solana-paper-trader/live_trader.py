@@ -19,6 +19,7 @@ from solana_paper_trader.scanner import DexscreenerClient, MarketDataError, Scan
 SOL_MINT = "So11111111111111111111111111111111111111112"
 PRIVY_BASE_URL = "https://api.privy.io"
 JUPITER_BASE_URL = "https://api.jup.ag"
+RUGCHECK_BASE_URL = "https://api.rugcheck.xyz"
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
 
 
@@ -493,6 +494,47 @@ class LiveTrader:
                     )
             except (TypeError, ValueError):
                 reasons.append("invalid_top_holders_pct")
+
+        reasons.extend(self._rugcheck_reasons(mint))
+
+        return reasons
+
+    def _rugcheck_reasons(self, mint: str) -> list[str]:
+        """Checks RugCheck.xyz's free public report for LP-lock status and
+        danger-level risk flags — this catches liquidity-pull rug pulls that
+        Jupiter's own token audit does not (organic score is unreliable on
+        very fresh tokens, see min_organic_score comments).
+        If RugCheck itself is unreachable/rate-limited, we do NOT block
+        trading on that alone (mirrors how a GeckoTerminal outage doesn't
+        stop discovery) — we just skip this specific check for this token.
+        """
+        try:
+            report = self.http.json(
+                "GET",
+                f"{RUGCHECK_BASE_URL}/v1/tokens/{mint}/report/summary",
+                headers={"Accept": "application/json"},
+            )
+        except LiveBotError as error:
+            print(f"RUGCHECK UNAVAILABLE {mint}: {error}", flush=True)
+            return []
+
+        if not isinstance(report, dict):
+            return []
+
+        reasons: list[str] = []
+
+        if report.get("rugged") is True:
+            reasons.append("rugcheck_rugged")
+
+        risks = report.get("risks")
+        if isinstance(risks, list):
+            danger_names = [
+                str(r.get("name", "risk"))
+                for r in risks
+                if isinstance(r, dict) and str(r.get("level", "")).lower() == "danger"
+            ]
+            for name in danger_names[:3]:  # cap how many we stuff into the reason list
+                reasons.append(f"rugcheck_danger_{name.replace(' ', '_')}")
 
         return reasons
 
@@ -1315,6 +1357,11 @@ class LiveTrader:
             f"Token safety: holders>={self.config.min_holder_count}, "
             f"organic>={self.config.min_organic_score:.1f}, "
             f"top holders<={self.config.max_top_holders_pct:.1f}%",
+            flush=True,
+        )
+        print(
+            "RugCheck.xyz integration: LP-lock/rugged status + danger-level "
+            "risk flags checked before every buy (catches liquidity-pull rugs)",
             flush=True,
         )
         print(
