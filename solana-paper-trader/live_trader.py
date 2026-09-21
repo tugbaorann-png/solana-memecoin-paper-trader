@@ -20,6 +20,7 @@ SOL_MINT = "So11111111111111111111111111111111111111112"
 PRIVY_BASE_URL = "https://api.privy.io"
 JUPITER_BASE_URL = "https://api.jup.ag"
 RUGCHECK_BASE_URL = "https://api.rugcheck.xyz"
+GMGN_BASE_URL = "https://api.gmgn.ai"
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
 
 
@@ -78,6 +79,15 @@ class Config:
     min_holder_count: int = 200
     min_organic_score: float = 0.0
     max_top_holders_pct: float = 30.0
+    # GMGN smart-money / holder-quality gate. These are read-only checks
+    # against GMGN's OpenAPI (holder tagging: rat traders, bundler bots,
+    # suspected insiders) — a dimension neither Jupiter's audit nor RugCheck
+    # covers. If GMGN_API_KEY is not set, or GMGN is unreachable, this check
+    # is skipped entirely rather than blocking trading (fail-open, same
+    # pattern as RugCheck).
+    max_gmgn_rat_trader_pct: float = float(os.getenv("MAX_GMGN_RAT_TRADER_PCT", "15"))
+    max_gmgn_bundler_pct: float = float(os.getenv("MAX_GMGN_BUNDLER_PCT", "40"))
+    max_gmgn_insider_pct: float = float(os.getenv("MAX_GMGN_INSIDER_PCT", "20"))
 
     @property
     def live_enabled(self) -> bool:
@@ -374,6 +384,8 @@ class LiveTrader:
         self._pending_confirmations: dict[str, float] = {}
         self._discovery_cache: list[str] = []
         self._discovery_cache_at: float = 0.0
+        self._gmgn_api_key = os.getenv("GMGN_API_KEY", "").strip()
+        self._gmgn_debug_logs_left = 5
 
     def _rpc(self, method: str, params: list[Any]) -> Any:
         payload = self.http.json(
@@ -496,6 +508,7 @@ class LiveTrader:
                 reasons.append("invalid_top_holders_pct")
 
         reasons.extend(self._rugcheck_reasons(mint))
+        reasons.extend(self._gmgn_smart_money_reasons(mint))
 
         return reasons
 
@@ -535,6 +548,95 @@ class LiveTrader:
             ]
             for name in danger_names[:3]:  # cap how many we stuff into the reason list
                 reasons.append(f"rugcheck_danger_{name.replace(' ', '_')}")
+
+        return reasons
+
+    def _gmgn_smart_money_reasons(self, mint: str) -> list[str]:
+        """Uses GMGN's OpenAPI holder-tagging data as an additional
+        quality/safety signal: a high concentration of "rat trader" wallets
+        (churn/wash-style flippers), bundler-bot wallets (coordinated sniper
+        bundles at launch), or suspected-insider holdings is a strong tell
+        of a coordinated pump-and-dump — a dimension neither Jupiter's audit
+        nor RugCheck directly measures. Presence of GMGN-tagged "smart
+        money" wallets among the holders is logged for visibility but is
+        NOT used as a hard requirement (too few fresh tokens have smart
+        money in yet, and demanding it starved trade flow the same way the
+        old organic-score requirement did).
+
+        If GMGN_API_KEY is not configured, or GMGN is unreachable/rate
+        limited, this check is skipped entirely — fail-open, same pattern
+        as RugCheck — so a GMGN outage never stops the bot from trading.
+        """
+        if not self._gmgn_api_key:
+            return []
+
+        try:
+            report = self.http.json(
+                "GET",
+                f"{GMGN_BASE_URL}/v1/market/token_top_holders"
+                f"?chain=sol&address={mint}&limit=20",
+                headers={
+                    "Authorization": f"Bearer {self._gmgn_api_key}",
+                    "Accept": "application/json",
+                },
+            )
+        except LiveBotError as error:
+            print(f"GMGN UNAVAILABLE {mint}: {error}", flush=True)
+            return []
+
+        if not isinstance(report, dict):
+            return []
+
+        # First few real responses get logged in full (truncated) so we can
+        # confirm the actual field names/shape from live Render logs and
+        # tune the thresholds below without guessing blind.
+        if self._gmgn_debug_logs_left > 0:
+            self._gmgn_debug_logs_left -= 1
+            print(f"GMGN RAW RESPONSE {mint}: {json.dumps(report)[:800]}", flush=True)
+
+        data = report.get("data") if isinstance(report.get("data"), dict) else report
+        if not isinstance(data, dict):
+            return []
+
+        def _pct(*keys: str) -> float:
+            for key in keys:
+                value = data.get(key)
+                if value not in (None, ""):
+                    try:
+                        parsed = float(value)
+                        # GMGN sometimes returns rates as 0..1 fractions and
+                        # sometimes as 0..100 percentages depending on
+                        # endpoint/version — normalize to a 0..100 percentage.
+                        return parsed * 100 if parsed <= 1.0 else parsed
+                    except (TypeError, ValueError):
+                        continue
+            return 0.0
+
+        reasons: list[str] = []
+
+        rat_pct = _pct("rat_trader_amount_rate", "rat_trader_rate")
+        if rat_pct > self.config.max_gmgn_rat_trader_pct:
+            reasons.append(f"gmgn_rat_traders_{rat_pct:.1f}pct")
+
+        bundler_pct = _pct("bundler_trader_amount_rate", "bundler_amount_rate")
+        if bundler_pct > self.config.max_gmgn_bundler_pct:
+            reasons.append(f"gmgn_bundlers_{bundler_pct:.1f}pct")
+
+        insider_pct = _pct("suspected_insider_hold_rate", "insider_hold_rate")
+        if insider_pct > self.config.max_gmgn_insider_pct:
+            reasons.append(f"gmgn_insiders_{insider_pct:.1f}pct")
+
+        try:
+            smart_count = int(
+                data.get("smart_degen_count") or data.get("smart_money_count") or 0
+            )
+        except (TypeError, ValueError):
+            smart_count = 0
+        if smart_count > 0:
+            print(
+                f"GMGN SMART MONEY PRESENT {mint}: {smart_count} smart wallet(s) holding",
+                flush=True,
+            )
 
         return reasons
 
@@ -1332,7 +1434,7 @@ class LiveTrader:
     def run(self) -> None:
         print("=" * 72, flush=True)
         print(
-            "SOLANA LIVE BOT — V9 HIGH-FLOW SIGNAL / STRICT EXECUTION",
+            "SOLANA LIVE BOT — V13 GMGN SMART-MONEY LAYER",
             flush=True,
         )
         print(f"Privy wallet: {self.wallet_address}", flush=True)
@@ -1362,6 +1464,17 @@ class LiveTrader:
         print(
             "RugCheck.xyz integration: LP-lock/rugged status + danger-level "
             "risk flags checked before every buy (catches liquidity-pull rugs)",
+            flush=True,
+        )
+        print(
+            "GMGN smart-money layer: "
+            + (
+                f"ACTIVE (rat traders<={self.config.max_gmgn_rat_trader_pct:.0f}%, "
+                f"bundlers<={self.config.max_gmgn_bundler_pct:.0f}%, "
+                f"insiders<={self.config.max_gmgn_insider_pct:.0f}%)"
+                if self._gmgn_api_key
+                else "DISABLED (GMGN_API_KEY not set)"
+            ),
             flush=True,
         )
         print(
