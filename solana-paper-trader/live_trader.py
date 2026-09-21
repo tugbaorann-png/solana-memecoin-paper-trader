@@ -6,6 +6,7 @@ import math
 import os
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -571,23 +572,21 @@ class LiveTrader:
             return []
 
         try:
+            # Confirmed from GMGN's own gmgn-cli source (dist/client/OpenApiClient.js
+            # + signer.js on npm): read-only "Exist Auth" endpoints require the
+            # api key under the header "X-APIKEY", plus two mandatory query
+            # parameters — timestamp (unix seconds) and client_id (a fresh
+            # random UUID per request, NOT the api key itself).
+            auth_timestamp = int(time.time())
+            auth_client_id = str(uuid.uuid4())
             report = self.http.json(
                 "GET",
                 f"{GMGN_BASE_URL}/v1/market/token_top_holders"
                 f"?chain=sol&address={mint}&limit=20"
-                # The gateway's error was "missing api key or client_id" even
-                # with the key sent as a header, so it may expect it as a
-                # query parameter instead — trying several plausible names
-                # here, on top of the header attempt below, so whichever one
-                # their gateway actually reads gets through.
-                f"&client_id={self._gmgn_api_key}"
-                f"&api_key={self._gmgn_api_key}"
-                f"&ak={self._gmgn_api_key}",
+                f"&timestamp={auth_timestamp}"
+                f"&client_id={auth_client_id}",
                 headers={
-                    "Authorization": f"Bearer {self._gmgn_api_key}",
-                    "X-Api-Key": self._gmgn_api_key,
-                    "Ak": self._gmgn_api_key,
-                    "X-Ak": self._gmgn_api_key,
+                    "X-APIKEY": self._gmgn_api_key,
                     "Accept": "application/json",
                 },
             )
