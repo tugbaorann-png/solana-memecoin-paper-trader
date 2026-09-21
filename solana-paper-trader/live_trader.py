@@ -574,13 +574,16 @@ class LiveTrader:
             report = self.http.json(
                 "GET",
                 f"{GMGN_BASE_URL}/v1/market/token_top_holders"
-                f"?chain=sol&address={mint}&limit=20",
+                f"?chain=sol&address={mint}&limit=20"
+                # The gateway's error was "missing api key or client_id" even
+                # with the key sent as a header, so it may expect it as a
+                # query parameter instead — trying several plausible names
+                # here, on top of the header attempt below, so whichever one
+                # their gateway actually reads gets through.
+                f"&client_id={self._gmgn_api_key}"
+                f"&api_key={self._gmgn_api_key}"
+                f"&ak={self._gmgn_api_key}",
                 headers={
-                    # GMGN's gateway response for a missing/incorrect header
-                    # was "missing api key or client_id" — sending it under
-                    # several plausible header names at once so whichever
-                    # one their gateway actually checks gets through; unused
-                    # ones are harmless extra headers.
                     "Authorization": f"Bearer {self._gmgn_api_key}",
                     "X-Api-Key": self._gmgn_api_key,
                     "Ak": self._gmgn_api_key,
@@ -589,7 +592,10 @@ class LiveTrader:
                 },
             )
         except LiveBotError as error:
-            print(f"GMGN UNAVAILABLE {mint}: {error}", flush=True)
+            # Never let the API key reach the logs, even inside an error
+            # message that echoes the request URL back.
+            safe_error = str(error).replace(self._gmgn_api_key, "***REDACTED***")
+            print(f"GMGN UNAVAILABLE {mint}: {safe_error}", flush=True)
             return []
 
         if not isinstance(report, dict):
