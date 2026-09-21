@@ -571,7 +571,7 @@ class LiveTrader:
         if not self._gmgn_api_key:
             return []
 
-        try:
+        def _gmgn_get(subpath: str) -> dict | None:
             # Confirmed from GMGN's own gmgn-cli source (dist/client/OpenApiClient.js
             # + signer.js on npm): read-only "Exist Auth" endpoints require the
             # api key under the header "X-APIKEY", plus two mandatory query
@@ -579,77 +579,87 @@ class LiveTrader:
             # random UUID per request, NOT the api key itself).
             auth_timestamp = int(time.time())
             auth_client_id = str(uuid.uuid4())
-            report = self.http.json(
-                "GET",
-                f"{GMGN_BASE_URL}/v1/market/token_top_holders"
-                f"?chain=sol&address={mint}&limit=20"
-                f"&timestamp={auth_timestamp}"
-                f"&client_id={auth_client_id}",
-                headers={
-                    "X-APIKEY": self._gmgn_api_key,
-                    "Accept": "application/json",
-                },
-            )
-        except LiveBotError as error:
-            # Never let the API key reach the logs, even inside an error
-            # message that echoes the request URL back.
-            safe_error = str(error).replace(self._gmgn_api_key, "***REDACTED***")
-            print(f"GMGN UNAVAILABLE {mint}: {safe_error}", flush=True)
-            return []
+            try:
+                resp = self.http.json(
+                    "GET",
+                    f"{GMGN_BASE_URL}{subpath}"
+                    f"?chain=sol&address={mint}"
+                    f"&timestamp={auth_timestamp}"
+                    f"&client_id={auth_client_id}",
+                    headers={
+                        "X-APIKEY": self._gmgn_api_key,
+                        "Accept": "application/json",
+                    },
+                )
+            except LiveBotError as error:
+                # Never let the API key reach the logs, even inside an error
+                # message that echoes the request URL back.
+                safe_error = str(error).replace(self._gmgn_api_key, "***REDACTED***")
+                print(f"GMGN UNAVAILABLE {mint} {subpath}: {safe_error}", flush=True)
+                return None
+            if not isinstance(resp, dict):
+                return None
+            if self._gmgn_debug_logs_left > 0:
+                self._gmgn_debug_logs_left -= 1
+                print(f"GMGN RAW RESPONSE {mint} {subpath}: {json.dumps(resp)[:800]}", flush=True)
+            payload = resp.get("data") if isinstance(resp.get("data"), dict) else resp
+            return payload if isinstance(payload, dict) else None
 
-        if not isinstance(report, dict):
-            return []
-
-        # First few real responses get logged in full (truncated) so we can
-        # confirm the actual field names/shape from live Render logs and
-        # tune the thresholds below without guessing blind.
-        if self._gmgn_debug_logs_left > 0:
-            self._gmgn_debug_logs_left -= 1
-            print(f"GMGN RAW RESPONSE {mint}: {json.dumps(report)[:800]}", flush=True)
-
-        data = report.get("data") if isinstance(report.get("data"), dict) else report
-        if not isinstance(data, dict):
-            return []
-
-        def _pct(*keys: str) -> float:
-            for key in keys:
-                value = data.get(key)
-                if value not in (None, ""):
-                    try:
-                        parsed = float(value)
-                        # GMGN sometimes returns rates as 0..1 fractions and
-                        # sometimes as 0..100 percentages depending on
-                        # endpoint/version — normalize to a 0..100 percentage.
-                        return parsed * 100 if parsed <= 1.0 else parsed
-                    except (TypeError, ValueError):
-                        continue
-            return 0.0
+        # /v1/token/security: confirmed via GMGN's own published skill docs
+        # (github.com/GMGNAI/gmgn-skills, skills/gmgn-token/SKILL.md) to return
+        # these risk ratios directly at the top level of the response for a
+        # single mint — rat_trader_amount_rate, bundler_trader_amount_rate and
+        # suspected_insider_hold_rate as 0..1 fractions (this is the endpoint
+        # our code was missing; /v1/market/token_top_holders only returns a
+        # raw per-holder list and never had these fields).
+        security = _gmgn_get("/v1/token/security")
 
         reasons: list[str] = []
 
-        rat_pct = _pct("rat_trader_amount_rate", "rat_trader_rate")
-        if rat_pct > self.config.max_gmgn_rat_trader_pct:
-            reasons.append(f"gmgn_rat_traders_{rat_pct:.1f}pct")
+        if security is not None:
 
-        bundler_pct = _pct("bundler_trader_amount_rate", "bundler_amount_rate")
-        if bundler_pct > self.config.max_gmgn_bundler_pct:
-            reasons.append(f"gmgn_bundlers_{bundler_pct:.1f}pct")
+            def _pct(key: str) -> float:
+                value = security.get(key)
+                if value in (None, ""):
+                    return 0.0
+                try:
+                    parsed = float(value)
+                except (TypeError, ValueError):
+                    return 0.0
+                # Documented as 0..1 ratios, but normalize defensively in case
+                # a chain/version ever reports a 0..100 percentage instead.
+                return parsed * 100 if parsed <= 1.0 else parsed
 
-        insider_pct = _pct("suspected_insider_hold_rate", "insider_hold_rate")
-        if insider_pct > self.config.max_gmgn_insider_pct:
-            reasons.append(f"gmgn_insiders_{insider_pct:.1f}pct")
+            rat_pct = _pct("rat_trader_amount_rate")
+            if rat_pct > self.config.max_gmgn_rat_trader_pct:
+                reasons.append(f"gmgn_rat_traders_{rat_pct:.1f}pct")
 
-        try:
-            smart_count = int(
-                data.get("smart_degen_count") or data.get("smart_money_count") or 0
-            )
-        except (TypeError, ValueError):
-            smart_count = 0
-        if smart_count > 0:
-            print(
-                f"GMGN SMART MONEY PRESENT {mint}: {smart_count} smart wallet(s) holding",
-                flush=True,
-            )
+            bundler_pct = _pct("bundler_trader_amount_rate")
+            if bundler_pct > self.config.max_gmgn_bundler_pct:
+                reasons.append(f"gmgn_bundlers_{bundler_pct:.1f}pct")
+
+            insider_pct = _pct("suspected_insider_hold_rate")
+            if insider_pct > self.config.max_gmgn_insider_pct:
+                reasons.append(f"gmgn_insiders_{insider_pct:.1f}pct")
+
+        # /v1/token/info: confirmed via the same GMGN skill docs to carry a
+        # wallet_tags_stat object with wallet-tag counts, including
+        # wallet_tags_stat.smart_wallets — the count of GMGN-tagged "smart
+        # money" wallets currently holding this token. Logged for visibility
+        # only, not used as a hard requirement (see docstring above).
+        info = _gmgn_get("/v1/token/info")
+        if info is not None:
+            tags_stat = info.get("wallet_tags_stat")
+            if isinstance(tags_stat, dict):
+                try:
+                    smart_count = int(tags_stat.get("smart_wallets") or 0)
+                except (TypeError, ValueError):
+                    smart_count = 0
+                if smart_count > 0:
+                    print(
+                        f"GMGN SMART MONEY PRESENT {mint}: {smart_count} smart wallet(s) holding",
+                        flush=True,
+                    )
 
         return reasons
 
