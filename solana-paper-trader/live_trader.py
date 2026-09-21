@@ -576,7 +576,15 @@ class LiveTrader:
                 f"{GMGN_BASE_URL}/v1/market/token_top_holders"
                 f"?chain=sol&address={mint}&limit=20",
                 headers={
+                    # GMGN's gateway response for a missing/incorrect header
+                    # was "missing api key or client_id" — sending it under
+                    # several plausible header names at once so whichever
+                    # one their gateway actually checks gets through; unused
+                    # ones are harmless extra headers.
                     "Authorization": f"Bearer {self._gmgn_api_key}",
+                    "X-Api-Key": self._gmgn_api_key,
+                    "Ak": self._gmgn_api_key,
+                    "X-Ak": self._gmgn_api_key,
                     "Accept": "application/json",
                 },
             )
