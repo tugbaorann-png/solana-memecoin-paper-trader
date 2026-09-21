@@ -20,7 +20,7 @@ SOL_MINT = "So11111111111111111111111111111111111111112"
 PRIVY_BASE_URL = "https://api.privy.io"
 JUPITER_BASE_URL = "https://api.jup.ag"
 RUGCHECK_BASE_URL = "https://api.rugcheck.xyz"
-GMGN_BASE_URL = "https://api.gmgn.ai"
+GMGN_BASE_URL = "https://openapi.gmgn.ai"
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
 
 
