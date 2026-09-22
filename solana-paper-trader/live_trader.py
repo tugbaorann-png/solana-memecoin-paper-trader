@@ -23,6 +23,35 @@ JUPITER_BASE_URL = "https://api.jup.ag"
 RUGCHECK_BASE_URL = "https://api.rugcheck.xyz"
 GMGN_BASE_URL = "https://openapi.gmgn.ai"
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
+TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+# CAIP-2 chain id Privy expects for Solana mainnet-beta: the first 32 chars
+# of the mainnet genesis hash, per docs.privy.io/wallets/using-wallets/
+# solana/send-a-transaction and the CAIP-2 Solana namespace spec
+# (namespaces.chainagnostic.org/solana/caip350) — confirmed from both.
+SOLANA_MAINNET_CAIP2 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+_BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
+def _base58_decode(value: str) -> bytes:
+    num = 0
+    for char in value:
+        num = num * 58 + _BASE58_ALPHABET.index(char)
+    raw = num.to_bytes((num.bit_length() + 7) // 8, "big") if num else b""
+    pad = len(value) - len(value.lstrip("1"))
+    return b"\x00" * pad + raw
+
+
+def _encode_compact_u16(n: int) -> bytes:
+    out = bytearray()
+    while True:
+        elem = n & 0x7F
+        n >>= 7
+        if n:
+            out.append(elem | 0x80)
+        else:
+            out.append(elem)
+            break
+    return bytes(out)
 
 
 class LiveBotError(RuntimeError):
@@ -37,6 +66,14 @@ class FatalLiveBotError(LiveBotError):
 class Config:
     position_lamports: int = int(os.getenv("POSITION_LAMPORTS", "5000000"))
     reserve_lamports: int = int(os.getenv("RESERVE_LAMPORTS", "15000000"))
+    # Requested trade size in USD. When > 0, this takes priority over the
+    # static POSITION_LAMPORTS above: each buy converts this USD amount to
+    # SOL using a live SOL/USD price fetched right before the trade, so the
+    # position size tracks $1 even as SOL's price moves — a fixed lamports
+    # figure would silently drift off-target over time. Falls back to the
+    # static POSITION_LAMPORTS if the live price lookup ever fails
+    # (fail-open, same pattern as every other external check in this bot).
+    position_usd: float = float(os.getenv("POSITION_USD", "1.0"))
     # Fixed live exits requested for this test version.
     take_profit_pct: float = 18.0
     stop_loss_pct: float = -5.0
@@ -266,6 +303,33 @@ class PrivySigner:
             raise LiveBotError("Privy returned an empty signed transaction")
         return signed
 
+    def sign_and_send_transaction(self, transaction_base64: str) -> str:
+        # Confirmed from Privy's own docs (docs.privy.io/api-reference/
+        # wallets/solana/sign-and-send-transaction): same wallet RPC
+        # endpoint, method "signAndSendTransaction", plus a required
+        # "caip2" chain id. Privy signs AND broadcasts in one call and
+        # returns the transaction signature/hash.
+        payload = self.http.json(
+            "POST",
+            f"{PRIVY_BASE_URL}/v1/wallets/{self.wallet_id}/rpc",
+            headers=self.headers,
+            body={
+                "method": "signAndSendTransaction",
+                "caip2": SOLANA_MAINNET_CAIP2,
+                "params": {"transaction": transaction_base64, "encoding": "base64"},
+            },
+        )
+        try:
+            data = payload["data"]
+            signature = str(data.get("hash") or data.get("signature") or "")
+        except (KeyError, TypeError) as error:
+            raise LiveBotError(
+                f"Privy did not return a signAndSendTransaction result: {payload}"
+            ) from error
+        if not signature:
+            raise LiveBotError("Privy returned an empty transaction signature")
+        return signature
+
 
 class StateStore:
     version = 2
@@ -335,6 +399,25 @@ class StateStore:
         payload.setdefault("last_trade", None)
         payload["version"] = self.version
 
+        # One-time, opt-in stats reset: set RESET_TRADE_STATS=YES in Render's
+        # env vars, deploy once, then remove the var again (leaving it set
+        # would wipe the counters on every restart). Only zeroes the
+        # cumulative trade counters — open positions, seen-mint dedupe and
+        # rejection cooldowns are left untouched so nothing else breaks.
+        if os.getenv("RESET_TRADE_STATS", "").strip().upper() == "YES":
+            payload["completed_round_trips"] = 0
+            payload["wins"] = 0
+            payload["losses"] = 0
+            payload["net_realized_pnl_lamports"] = 0
+            payload["last_trade"] = None
+            print(
+                "TRADE STATS RESET: completed_round_trips/wins/losses/"
+                "net_realized_pnl_lamports zeroed (RESET_TRADE_STATS=YES). "
+                "Remove this env var now so it doesn't reset again on the "
+                "next restart.",
+                flush=True,
+            )
+
         return payload
 
     def save(self) -> None:
@@ -395,6 +478,9 @@ class LiveTrader:
         self._discovery_cache_at: float = 0.0
         self._gmgn_api_key = os.getenv("GMGN_API_KEY", "").strip()
         self._gmgn_debug_logs_left = 5
+        self._coingecko_api_key = os.getenv("COINGECKO_API_KEY", "").strip()
+        self._sol_usd_price: float | None = None
+        self._sol_usd_price_at: float = 0.0
 
     def _rpc(self, method: str, params: list[Any]) -> Any:
         payload = self.http.json(
@@ -416,6 +502,162 @@ class LiveTrader:
         except (TypeError, KeyError, ValueError) as error:
             raise LiveBotError(f"Invalid Solana balance response: {result}") from error
 
+    def _resolve_position_lamports(self) -> int:
+        """Converts config.position_usd to lamports using a live SOL/USD
+        price (cached 30s so we don't hit the price API on every scan
+        cycle), so trade size tracks the requested USD amount instead of
+        drifting as SOL's price moves. Falls back to the static
+        POSITION_LAMPORTS if position_usd is disabled (<=0) or the live
+        price lookup fails for any reason — fail-open, same pattern as
+        every other external check in this bot.
+        """
+        if self.config.position_usd <= 0:
+            return self.config.position_lamports
+
+        now_mono = time.monotonic()
+        if self._sol_usd_price is None or now_mono - self._sol_usd_price_at > 30:
+            try:
+                headers = (
+                    {"x-cg-demo-api-key": self._coingecko_api_key}
+                    if self._coingecko_api_key
+                    else None
+                )
+                payload = self.http.json(
+                    "GET",
+                    "https://api.coingecko.com/api/v3/simple/price"
+                    "?ids=solana&vs_currencies=usd",
+                    headers=headers,
+                )
+                price = float((payload or {}).get("solana", {}).get("usd") or 0)
+                if price > 0:
+                    self._sol_usd_price = price
+                    self._sol_usd_price_at = now_mono
+            except (LiveBotError, TypeError, ValueError, AttributeError) as error:
+                print(f"SOL/USD PRICE LOOKUP FAILED: {error}", flush=True)
+
+        if not self._sol_usd_price:
+            return self.config.position_lamports
+
+        lamports = int(round(self.config.position_usd / self._sol_usd_price * 1e9))
+        # Never size below the static fallback's floor or so small that
+        # Jupiter's swap/price-impact math turns unreliable on dust amounts.
+        return max(lamports, 1_000_000)
+
+    def _close_token_account(self, mint: str) -> None:
+        """Best-effort cleanup: after a full sell, the wallet is left
+        holding an now-empty SPL token account for `mint`. Solana locks a
+        rent-exempt SOL deposit in that account (confirmed via Solana's
+        current, September-2026 rent schedule to be roughly 0.0015 SOL for
+        a standard token account) until it is explicitly closed — Jupiter's
+        swap API never does this on its own. Reclaiming it immediately
+        turns that otherwise-stranded SOL back into usable trading balance,
+        which matters a lot at small position sizes. This is a nice-to-have
+        cleanup step: any failure here is logged and swallowed, never
+        allowed to affect the already-recorded sell.
+        """
+        try:
+            accounts = self._rpc(
+                "getTokenAccountsByOwner",
+                [
+                    self.wallet_address,
+                    {"mint": mint},
+                    {"encoding": "jsonParsed", "commitment": "confirmed"},
+                ],
+            )
+            entries = (accounts or {}).get("value") if isinstance(accounts, dict) else None
+            if not entries:
+                return  # nothing left to close
+
+            entry = entries[0]
+            token_account_pubkey = str(entry.get("pubkey") or "")
+            parsed = (
+                entry.get("account", {})
+                .get("data", {})
+                .get("parsed", {})
+                .get("info", {})
+            )
+            remaining = str((parsed.get("tokenAmount") or {}).get("amount") or "0")
+            if not token_account_pubkey or remaining != "0":
+                return  # not actually empty yet — don't risk it
+
+            blockhash_result = self._rpc(
+                "getLatestBlockhash", [{"commitment": "finalized"}]
+            )
+            recent_blockhash = str(
+                ((blockhash_result or {}).get("blockhash"))
+                or ((blockhash_result or {}).get("value") or {}).get("blockhash")
+                or ""
+            )
+            if not recent_blockhash:
+                raise LiveBotError("No recent blockhash for close-account transaction")
+
+            unsigned_tx = self._build_close_account_transaction(
+                token_account_pubkey, recent_blockhash
+            )
+            signature = self.signer.sign_and_send_transaction(unsigned_tx)
+            print(
+                f"TOKEN ACCOUNT CLOSED {mint}: rent reclaimed, "
+                f"signature={signature}",
+                flush=True,
+            )
+        except Exception as error:  # cleanup must never break the trading loop
+            print(f"TOKEN ACCOUNT CLOSE SKIPPED {mint}: {error}", flush=True)
+
+    def _build_close_account_transaction(
+        self, token_account_pubkey: str, recent_blockhash: str
+    ) -> str:
+        """Hand-builds a minimal, unsigned legacy Solana transaction
+        containing a single SPL Token Program CloseAccount instruction
+        (instruction index 9; accounts: [account_to_close, destination,
+        owner], per the SPL Token program spec), base64-encoded for Privy's
+        signAndSendTransaction call. No solana/solders SDK is available in
+        this environment, so the wire format (message header, compact-u16
+        array lengths, account key ordering) is constructed by hand.
+        """
+        wallet_bytes = _base58_decode(self.wallet_address)
+        token_account_bytes = _base58_decode(token_account_pubkey)
+        token_program_bytes = _base58_decode(TOKEN_PROGRAM_ID)
+        blockhash_bytes = _base58_decode(recent_blockhash)
+
+        for name, raw in (
+            ("wallet address", wallet_bytes),
+            ("token account", token_account_bytes),
+            ("token program", token_program_bytes),
+            ("recent blockhash", blockhash_bytes),
+        ):
+            if len(raw) != 32:
+                raise LiveBotError(f"Decoded {name} is not 32 bytes ({len(raw)})")
+
+        # Account order: writable signer (wallet) first, then writable
+        # non-signer (token account), then readonly non-signer (program).
+        account_keys = [wallet_bytes, token_account_bytes, token_program_bytes]
+        header = bytes([1, 0, 1])
+
+        message = bytearray()
+        message += header
+        message += _encode_compact_u16(len(account_keys))
+        for key in account_keys:
+            message += key
+        message += blockhash_bytes
+
+        # CloseAccount(accounts=[to_close, destination, owner], data=[9]).
+        # to_close=index 1 (token account), destination=owner=index 0 (wallet).
+        instruction_accounts = bytes([1, 0, 0])
+        instruction_data = bytes([9])
+        message += _encode_compact_u16(1)
+        message += bytes([2])  # programIdIndex -> token program
+        message += _encode_compact_u16(len(instruction_accounts))
+        message += instruction_accounts
+        message += _encode_compact_u16(len(instruction_data))
+        message += instruction_data
+
+        transaction = bytearray()
+        transaction += _encode_compact_u16(1)  # one signature slot
+        transaction += bytes(64)  # zero-filled; Privy fills this in
+        transaction += message
+
+        return base64.b64encode(bytes(transaction)).decode("ascii")
+
     @staticmethod
     def _amount(payload: dict[str, Any], *keys: str) -> int:
         for key in keys:
@@ -435,11 +677,12 @@ class LiveTrader:
 
     def _route_safety(self, mint: str) -> list[str]:
         reasons: list[str] = []
+        position_lamports = self._resolve_position_lamports()
 
         buy_quote = self.jupiter.order(
             SOL_MINT,
             mint,
-            self.config.position_lamports,
+            position_lamports,
         )
         buy_out = self._amount(buy_quote, "outAmount")
         buy_impact = float(buy_quote.get("priceImpact") or 0)
@@ -461,7 +704,7 @@ class LiveTrader:
             reasons.append(f"sell_price_impact_{sell_impact:.2f}_pct")
 
         if sell_out > 0:
-            roundtrip_pct = sell_out / self.config.position_lamports * 100
+            roundtrip_pct = sell_out / position_lamports * 100
             if roundtrip_pct < self.config.min_roundtrip_return_pct:
                 reasons.append(f"roundtrip_quote_{roundtrip_pct:.1f}_pct")
 
@@ -1164,8 +1407,10 @@ class LiveTrader:
         if not self._can_open_more():
             return False
 
+        position_lamports = self._resolve_position_lamports()
+
         balance = self.sol_balance_lamports()
-        required = self.config.position_lamports + self.config.reserve_lamports
+        required = position_lamports + self.config.reserve_lamports
 
         if balance < required:
             print(
@@ -1181,7 +1426,7 @@ class LiveTrader:
         order = self.jupiter.order(
             SOL_MINT,
             mint,
-            self.config.position_lamports,
+            position_lamports,
             taker=self.wallet_address,
         )
 
@@ -1197,7 +1442,7 @@ class LiveTrader:
 
         print(
             f"BUYING {scan.snapshot.symbol}: "
-            f"{self.config.position_lamports / 1e9:.6f} SOL",
+            f"{position_lamports / 1e9:.6f} SOL (~${self.config.position_usd:.2f})",
             flush=True,
         )
 
@@ -1245,7 +1490,7 @@ class LiveTrader:
 
         print(
             f"\033[92m🟢🟢🟢 BUY OPENED — {scan.snapshot.symbol} — "
-            f"{self.config.position_lamports / 1e9:.6f} SOL 🟢🟢🟢\033[0m",
+            f"{position_lamports / 1e9:.6f} SOL 🟢🟢🟢\033[0m",
             flush=True,
         )
         print(
@@ -1376,6 +1621,11 @@ class LiveTrader:
             flush=True,
         )
 
+        # Best-effort: reclaim the SPL token account's locked rent now that the
+        # position is fully closed. Never allowed to affect the sell already
+        # recorded above — failures are logged and swallowed inside the method.
+        self._close_token_account(mint)
+
     def _manage_open_positions(self) -> None:
         open_positions = list(self._open_positions().items())
 
@@ -1482,11 +1732,18 @@ class LiveTrader:
         )
         print(f"Privy wallet: {self.wallet_address}", flush=True)
         print(f"Live armed: {self.config.live_enabled}", flush=True)
-        print(
-            f"Position per entry: "
-            f"{self.config.position_lamports / 1e9:.6f} SOL",
-            flush=True,
-        )
+        if self.config.position_usd > 0:
+            print(
+                f"Position per entry: ~${self.config.position_usd:.2f} "
+                f"(live SOL price, fallback {self.config.position_lamports / 1e9:.6f} SOL)",
+                flush=True,
+            )
+        else:
+            print(
+                f"Position per entry: "
+                f"{self.config.position_lamports / 1e9:.6f} SOL",
+                flush=True,
+            )
         print(
             f"TP/SL: +{self.config.take_profit_pct:.1f}% / "
             f"{self.config.stop_loss_pct:.1f}%",
