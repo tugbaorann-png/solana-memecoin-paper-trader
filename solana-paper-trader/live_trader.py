@@ -24,6 +24,14 @@ RUGCHECK_BASE_URL = "https://api.rugcheck.xyz"
 GMGN_BASE_URL = "https://openapi.gmgn.ai"
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
 TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+# Some newer pump.fun-style launches mint under Token-2022 (Token Extensions)
+# instead of the legacy Token program. A CloseAccount instruction sent to the
+# WRONG program for a given account is rejected on-chain, which is exactly
+# what every one of this bot's close-account attempts has hit so far
+# (InvalidAccountData, 100% failure rate across 7 different tokens over 8+
+# hours — see _close_token_account, which now reads the account's actual
+# owner program via getAccountInfo instead of assuming legacy Token).
+TOKEN_2022_PROGRAM_ID = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 # CAIP-2 chain id Privy expects for Solana mainnet-beta: the first 32 chars
 # of the mainnet genesis hash, per docs.privy.io/wallets/using-wallets/
 # solana/send-a-transaction and the CAIP-2 Solana namespace spec
@@ -583,15 +591,30 @@ class LiveTrader:
 
             entry = entries[0]
             token_account_pubkey = str(entry.get("pubkey") or "")
+            account_data = entry.get("account", {}) if isinstance(entry, dict) else {}
             parsed = (
-                entry.get("account", {})
-                .get("data", {})
+                account_data.get("data", {})
                 .get("parsed", {})
                 .get("info", {})
             )
             remaining = str((parsed.get("tokenAmount") or {}).get("amount") or "0")
             if not token_account_pubkey or remaining != "0":
                 return  # not actually empty yet — don't risk it
+
+            # Use the account's ACTUAL owning program (legacy Token or
+            # Token-2022), not an assumed one — sending CloseAccount to the
+            # wrong program is what caused every prior close attempt to be
+            # rejected on-chain with InvalidAccountData. getTokenAccountsByOwner
+            # already told us this (it had to know the program to parse the
+            # account at all), so read it straight from that same response
+            # instead of a second RPC round-trip.
+            token_program_id = str(account_data.get("owner") or "") or TOKEN_PROGRAM_ID
+            if token_program_id != TOKEN_PROGRAM_ID:
+                print(
+                    f"TOKEN ACCOUNT {mint}: owned by non-legacy program "
+                    f"{token_program_id} (likely Token-2022), using it for close",
+                    flush=True,
+                )
 
             blockhash_result = self._rpc(
                 "getLatestBlockhash", [{"commitment": "finalized"}]
@@ -605,7 +628,7 @@ class LiveTrader:
                 raise LiveBotError("No recent blockhash for close-account transaction")
 
             unsigned_tx = self._build_close_account_transaction(
-                token_account_pubkey, recent_blockhash
+                token_account_pubkey, recent_blockhash, token_program_id
             )
             signature = self.signer.sign_and_send_transaction(unsigned_tx)
             print(
@@ -617,10 +640,12 @@ class LiveTrader:
             print(f"TOKEN ACCOUNT CLOSE SKIPPED {mint}: {error}", flush=True)
 
     def _build_close_account_transaction(
-        self, token_account_pubkey: str, recent_blockhash: str
+        self, token_account_pubkey: str, recent_blockhash: str, token_program_id: str
     ) -> str:
         """Hand-builds a minimal, unsigned legacy Solana transaction
-        containing a single SPL Token Program CloseAccount instruction
+        containing a single Token Program CloseAccount instruction against
+        whichever program (`token_program_id`) actually owns the account —
+        legacy Token and Token-2022 both use the same CloseAccount layout
         (instruction index 9; accounts: [account_to_close, destination,
         owner], per the SPL Token program spec), base64-encoded for Privy's
         signAndSendTransaction call. No solana/solders SDK is available in
@@ -629,7 +654,7 @@ class LiveTrader:
         """
         wallet_bytes = _base58_decode(self.wallet_address)
         token_account_bytes = _base58_decode(token_account_pubkey)
-        token_program_bytes = _base58_decode(TOKEN_PROGRAM_ID)
+        token_program_bytes = _base58_decode(token_program_id)
         blockhash_bytes = _base58_decode(recent_blockhash)
 
         for name, raw in (
