@@ -52,6 +52,14 @@ class Config:
     scan_limit: int = min(int(os.getenv("SCAN_LIMIT", "50")), 50)
     discovery_pages: int = 5
     discovery_refresh_seconds: float = 60.0
+    # Confirmed via CoinGecko's own docs (docs.coingecko.com/demo/reference/
+    # latest-pools-network): the fully keyless api.geckoterminal.com/api.
+    # coingecko.com endpoint shares its rate limit across every user on the
+    # same outbound IP ("not suitable for production or scheduled polling").
+    # A free Demo API key (no credit card, coingecko.com/en/api/pricing)
+    # gives a dedicated, non-shared 100 calls/min instead. Optional — if
+    # unset, discovery keeps working exactly as before, just rate-limited.
+    coingecko_api_key: str = os.getenv("COINGECKO_API_KEY", "").strip()
     discovery_min_pool_age_minutes: float = 15.0
     discovery_max_pool_age_minutes: float = 90.0
     max_open_positions: int = min(int(os.getenv("MAX_OPEN_POSITIONS", "3")), 3)
@@ -733,14 +741,26 @@ class LiveTrader:
         seen: set[str] = set()
         page_errors = 0
 
+        # Confirmed via CoinGecko's own docs (docs.coingecko.com/demo/
+        # reference/latest-pools-network): this is the same on-chain pool
+        # data as api.geckoterminal.com's endpoint, same JSON:API response
+        # shape (attributes.pool_created_at, relationships.base_token.data.id
+        # = "solana_<mint>"), just reachable under CoinGecko's own domain
+        # with an optional Demo API key for a dedicated (non-IP-shared)
+        # rate limit instead of the keyless endpoint's shared one.
+        gecko_headers = (
+            {"x-cg-demo-api-key": self.config.coingecko_api_key}
+            if self.config.coingecko_api_key
+            else None
+        )
         for page in range(1, self.config.discovery_pages + 1):
             url = (
-                "https://api.geckoterminal.com/api/v2/"
+                "https://api.coingecko.com/api/v3/onchain/"
                 "networks/solana/new_pools"
                 f"?page={page}&include=base_token"
             )
             try:
-                payload = self.http.json("GET", url)
+                payload = self.http.json("GET", url, headers=gecko_headers)
             except LiveBotError as error:
                 page_errors += 1
                 print(
