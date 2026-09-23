@@ -130,7 +130,16 @@ class Config:
     trailing_distance_pct: float = 4.0
     trailing_floor_pct: float = 3.0
     max_hold_seconds: float = 600.0
-    min_holder_count: int = 200
+    # Was a hardcoded 200 — for tokens whose pools are only 15-90 minutes
+    # old (our discovery window), reaching 200 unique holders is rare, so
+    # this single gate was very likely the main reason trade frequency was
+    # ~1/day: almost every fresh candidate died here before reaching the
+    # execution/confirmation stages. Lowered default to 50 and made it
+    # tunable via env without a code change. Loosening this raises exposure
+    # to thin-holder tokens, which is exactly what the top-holder-% cap,
+    # RugCheck LP-lock check and GMGN rat/bundler/insider gates below exist
+    # to catch — those are left untouched.
+    min_holder_count: int = int(os.getenv("MIN_HOLDER_COUNT", "50"))
     min_organic_score: float = 0.0
     max_top_holders_pct: float = 30.0
     # GMGN smart-money / holder-quality gate. These are read-only checks
@@ -1935,8 +1944,57 @@ class LiveTrader:
                 time.sleep(15)
 
 
+class _Tee:
+    """Mirrors everything written to stdout into a log file as well.
+
+    Every print() call in this bot already goes through stdout with
+    flush=True, so this is the one place needed to make that output
+    durable across container/session restarts instead of vanishing the
+    moment the process exits. Opens in append mode so restarts keep
+    history instead of clobbering it, and truncates the file back to its
+    last ~5MB if it grows past ~20MB so it can't fill the disk unbounded.
+    """
+
+    def __init__(self, stream: Any, log_path: Path) -> None:
+        self._stream = stream
+        self._log_path = log_path
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(log_path, "a", encoding="utf-8")
+
+    def write(self, data: str) -> int:
+        self._stream.write(data)
+        try:
+            if self._fh.tell() > 20_000_000:
+                self._fh.close()
+                raw = self._log_path.read_bytes()[-5_000_000:]
+                self._log_path.write_bytes(raw)
+                self._fh = open(self._log_path, "a", encoding="utf-8")
+            self._fh.write(data)
+            self._fh.flush()
+        except OSError:
+            pass
+        return len(data)
+
+    def flush(self) -> None:
+        self._stream.flush()
+        try:
+            self._fh.flush()
+        except OSError:
+            pass
+
+
 def main() -> int:
     config = Config()
+
+    log_path = config.state_path.parent / "live_trader.log"
+    try:
+        import sys
+
+        sys.stdout = _Tee(sys.stdout, log_path)
+        sys.stderr = _Tee(sys.stderr, log_path)
+        print(f"[LOGGING] mirroring console output to {log_path}", flush=True)
+    except OSError as error:
+        print(f"[LOGGING] could not open log file {log_path}: {error}", flush=True)
 
     if config.position_lamports <= 0 or config.reserve_lamports < 0:
         raise SystemExit("Invalid position/reserve configuration")
@@ -1960,6 +2018,30 @@ def main() -> int:
 
     if config.max_completed_round_trips < 0:
         raise SystemExit("MAX_COMPLETED_ROUND_TRIPS cannot be negative")
+
+    # Render's "web service" type requires the process to answer HTTP
+    # health checks on $PORT, or Render assumes it crashed and restarts it
+    # in a loop — this bot has nothing to do with HTTP, it just needs to
+    # not look dead to Render. Only starts when $PORT is actually set
+    # (Render sets it; running locally/elsewhere leaves this off).
+    port = os.getenv("PORT", "").strip()
+    if port:
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class _HealthHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 (stdlib method name)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *args: Any) -> None:  # silence per-request logging
+                pass
+
+        server = HTTPServer(("0.0.0.0", int(port)), _HealthHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        print(f"[HEALTHCHECK] listening on 0.0.0.0:{port}", flush=True)
 
     trader = LiveTrader(config)
     trader.run()
