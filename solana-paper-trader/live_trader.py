@@ -199,18 +199,25 @@ class Config:
     max_gmgn_rat_trader_pct: float = float(os.getenv("MAX_GMGN_RAT_TRADER_PCT", "15"))
     max_gmgn_bundler_pct: float = float(os.getenv("MAX_GMGN_BUNDLER_PCT", "40"))
     max_gmgn_insider_pct: float = float(os.getenv("MAX_GMGN_INSIDER_PCT", "20"))
-    # Smart-money wallets are NOT made a hard buy requirement — too few fresh
-    # tokens have any smart-money holders yet, and requiring it would starve
-    # trade flow the same way the old organic-score requirement did (learned
-    # the hard way earlier in this bot's history). Instead it's used as a
-    # tie-breaker on tokens that are borderline-risky: if GMGN shows ZERO
-    # smart-money wallets holding AND any of the rat-trader/bundler/insider
-    # ratios are already past this soft fraction of their hard cap (e.g. 0.6
-    # of MAX_GMGN_RAT_TRADER_PCT), the token is rejected even though it did
-    # not cross the hard cap itself — no smart money + meaningfully elevated
-    # risk ratios together are a materially worse combination than either
-    # alone. A token with genuinely low risk ratios still passes with zero
-    # smart money, exactly as before.
+    # STRATEGY CHANGE (v10): smart-money wallet presence is now a HARD buy
+    # requirement, not just a tie-breaker. This was deliberately soft in the
+    # old "fresh 15-90min token" strategy because almost no brand-new token
+    # has any smart-money holders yet, so requiring it would have starved
+    # trade flow entirely. That reasoning no longer applies: discovery now
+    # only surfaces GeckoTerminal *trending* pools with real sustained 6h
+    # volume (see discovery_min/max_pool_age_minutes), and live logs confirm
+    # most of these already carry 15-65+ GMGN-tagged smart-money wallets, so
+    # the pool is large enough to filter on. This is the single most
+    # evidence-backed edge available to a retail bot in this market: buying
+    # only where wallets GMGN has already tagged as historically profitable
+    # are also positioned, i.e. lightweight copy-trading. It is not a
+    # guarantee — smart-tagged wallets can still be wrong on any single
+    # trade — but it is the only signal here with any track record behind
+    # it, unlike raw momentum/liquidity thresholds which have none.
+    min_gmgn_smart_wallets: int = int(os.getenv("MIN_GMGN_SMART_WALLETS", "2"))
+    # Kept as a secondary tightener even after the hard gate above: among
+    # tokens that already cleared min_gmgn_smart_wallets, one that ALSO has
+    # a risk ratio past this soft fraction of its hard cap is rejected.
     gmgn_soft_risk_ratio: float = float(os.getenv("GMGN_SOFT_RISK_RATIO", "0.6"))
 
     @property
@@ -899,28 +906,18 @@ class LiveTrader:
         return reasons
 
     def _gmgn_smart_money_reasons(self, mint: str) -> list[str]:
-        """Uses GMGN's OpenAPI holder-tagging data as an additional
-        quality/safety signal: a high concentration of "rat trader" wallets
-        (churn/wash-style flippers), bundler-bot wallets (coordinated sniper
-        bundles at launch), or suspected-insider holdings is a strong tell
-        of a coordinated pump-and-dump — a dimension neither Jupiter's audit
-        nor RugCheck directly measures.
-
-        GMGN-tagged "smart money" wallet presence is NOT made a hard buy
-        requirement — too few fresh tokens have any smart-money holders yet,
-        and demanding it starved trade flow the same way the old
-        organic-score requirement did (learned the hard way earlier in this
-        bot's history). Instead it is used as a tie-breaker on tokens that
-        are already borderline-risky: zero smart-money wallets combined with
-        a rat-trader/bundler/insider ratio that has already crossed
-        config.gmgn_soft_risk_ratio of its hard cap (below the cap, so it
-        would otherwise pass) is rejected. A token with genuinely low risk
-        ratios still passes with zero smart-money wallets, exactly as
-        before — this only tightens the borderline cases.
+        """Uses GMGN's OpenAPI holder-tagging data as the bot's primary
+        quality signal (v10 strategy change — see config.min_gmgn_smart_wallets
+        for the full reasoning): a token is now rejected outright if fewer
+        than config.min_gmgn_smart_wallets GMGN-tagged smart-money wallets
+        currently hold it, on top of the existing rat-trader / bundler /
+        insider concentration caps.
 
         If GMGN_API_KEY is not configured, or GMGN is unreachable/rate
-        limited, this check is skipped entirely — fail-open, same pattern
-        as RugCheck — so a GMGN outage never stops the bot from trading.
+        limited for this specific token, this check is skipped entirely —
+        fail-open, same pattern as RugCheck — so a GMGN outage never stops
+        the bot from trading. This means the hard smart-money-count gate
+        only actually applies when GMGN successfully answered for this mint.
         """
         if not self._gmgn_api_key:
             return []
@@ -1003,6 +1000,7 @@ class LiveTrader:
         # money" wallets currently holding this token.
         info = _gmgn_get("/v1/token/info")
         smart_count = 0
+        info_loaded = info is not None
         if info is not None:
             tags_stat = info.get("wallet_tags_stat")
             if isinstance(tags_stat, dict):
@@ -1016,13 +1014,21 @@ class LiveTrader:
                         flush=True,
                     )
 
-        # Tie-breaker: only applies to tokens that didn't already trip a hard
-        # cap above. Zero smart-money wallets plus any risk ratio already
-        # past its soft fraction of the hard cap is rejected — no smart
-        # money AND meaningfully elevated risk together is worse than either
-        # alone. security must actually have loaded (rat_pct etc. all being
-        # 0.0 from a failed fetch must never look like "0% risk, reject").
-        if security is not None and smart_count == 0:
+        # HARD GATE (v10 strategy change): only applies when GMGN actually
+        # answered for this mint (info_loaded) — a fetch failure must never
+        # look like "0 smart wallets, reject", same fail-open principle as
+        # every other GMGN check here.
+        if info_loaded and smart_count < self.config.min_gmgn_smart_wallets:
+            reasons.append(
+                f"gmgn_insufficient_smart_money_{smart_count}_below_"
+                f"{self.config.min_gmgn_smart_wallets}"
+            )
+
+        # Secondary tightener: among tokens that already have enough
+        # smart-money wallets, one whose risk ratios are past this soft
+        # fraction of their hard cap is still rejected (elevated risk isn't
+        # excused just because some smart wallets are also in).
+        if security is not None:
             soft_ratio = self.config.gmgn_soft_risk_ratio
             soft_hits = []
             if rat_pct > self.config.max_gmgn_rat_trader_pct * soft_ratio:
@@ -1032,7 +1038,7 @@ class LiveTrader:
             if insider_pct > self.config.max_gmgn_insider_pct * soft_ratio:
                 soft_hits.append(f"insiders_{insider_pct:.1f}pct")
             if soft_hits and not reasons:
-                reasons.append(f"gmgn_no_smart_money_elevated_risk_{'_'.join(soft_hits)}")
+                reasons.append(f"gmgn_elevated_risk_{'_'.join(soft_hits)}")
 
         return reasons
 
@@ -1960,9 +1966,10 @@ class LiveTrader:
             flush=True,
         )
         print(
-            "GMGN smart-money layer: "
+            "GMGN smart-money layer (v10, HARD gate): "
             + (
-                f"ACTIVE (rat traders<={self.config.max_gmgn_rat_trader_pct:.0f}%, "
+                f"ACTIVE (min_smart_wallets>={self.config.min_gmgn_smart_wallets}, "
+                f"rat traders<={self.config.max_gmgn_rat_trader_pct:.0f}%, "
                 f"bundlers<={self.config.max_gmgn_bundler_pct:.0f}%, "
                 f"insiders<={self.config.max_gmgn_insider_pct:.0f}%)"
                 if self._gmgn_api_key
