@@ -95,8 +95,23 @@ class Config:
     # Check open positions at least every 5 seconds to reduce stop overshoot.
     open_poll_seconds: float = min(float(os.getenv("OPEN_POLL_SECONDS", "1")), 1.0)
     scan_limit: int = min(int(os.getenv("SCAN_LIMIT", "50")), 50)
-    discovery_pages: int = 5
-    discovery_refresh_seconds: float = 60.0
+    # CoinGecko's free Demo API key gives 10,000 calls/month (and a
+    # 30-calls/minute cap). The old settings here (5 pages every 60s) cost
+    # ~5 calls/min sustained — about 7,200/day, which burns a full month's
+    # quota in under 2 days regardless of whether a key is configured; the
+    # "rate limit reached" errors seen in production were this, not a
+    # missing or broken key. Lowered pages and lengthened the refresh
+    # interval to bring sustained usage to roughly 2 calls / 10 min ≈ 288
+    # calls/day ≈ 8,640/month — comfortably inside the Demo quota with
+    # room for the odd retry. This also fits the discovery strategy change
+    # above: now that discovery targets pools that have already survived
+    # 60+ minutes with real trending volume, there is no need to re-poll
+    # every 60 seconds the way a race against brand-new launches would
+    # have required.
+    discovery_pages: int = min(int(os.getenv("DISCOVERY_PAGES", "2")), 10)
+    discovery_refresh_seconds: float = float(
+        os.getenv("DISCOVERY_REFRESH_SECONDS", "600")
+    )
     # Confirmed via CoinGecko's own docs (docs.coingecko.com/demo/reference/
     # latest-pools-network): the fully keyless api.geckoterminal.com/api.
     # coingecko.com endpoint shares its rate limit across every user on the
