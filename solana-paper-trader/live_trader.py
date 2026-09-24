@@ -173,7 +173,23 @@ class Config:
     min_entry_buy_pressure_pct: float = float(os.getenv("MIN_ENTRY_BUY_PRESSURE_PCT", "2"))
     confirmation_seconds: float = float(os.getenv("ENTRY_CONFIRMATION_SECONDS", "15"))
     min_entry_price_change_5m_pct: float = float(os.getenv("MIN_ENTRY_PRICE_CHANGE_5M_PCT", "1.5"))
-    max_entry_price_change_5m_pct: float = float(os.getenv("MAX_ENTRY_PRICE_CHANGE_5M_PCT", "40"))
+    # STRATEGY CHANGE (v10): lowered from 40 to 20. Live log evidence from
+    # this bot's own trades (2026-09-24, post smart-money-gate deploy) shows
+    # the actual failure mode: FUND and AI were both already -2.2% / -2.4%
+    # the instant they were bought (pure entry price-impact/slippage cost —
+    # see min_roundtrip_return_pct), then kept sliding to their stop-loss
+    # within ~20-25s, never once going positive. .agent similarly peaked at
+    # only +1.56% before crashing to -8.4% in about 6 seconds. None of these
+    # were random noise — a token already up close to 40% in 5 minutes is a
+    # move that, empirically here, is exhausted or reversing by the time our
+    # entry gates (baseline -> signal -> token_safety -> execution -> 15s
+    # confirmation) finish clearing it, i.e. we were systematically buying
+    # near the local top of moves that had already run most of their
+    # course. Capping entries to a smaller, earlier part of the move (still
+    # requires >=1.5% per min_entry_price_change_5m_pct, so this isn't
+    # "buy anything flat") is a direct response to that specific evidence,
+    # not a guess.
+    max_entry_price_change_5m_pct: float = float(os.getenv("MAX_ENTRY_PRICE_CHANGE_5M_PCT", "20"))
     trailing_activation_pct: float = 8.0
     trailing_distance_pct: float = 4.0
     trailing_floor_pct: float = 3.0
