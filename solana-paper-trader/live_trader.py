@@ -1603,9 +1603,26 @@ class LiveTrader:
         exit_impact = float(order.get("priceImpact") or 0)
         skip_count = int(position.get("exit_skip_count", 0))
         is_rug_protection = reason == "RUG_PROTECTION"
+        # STOP_LOSS and TIME_STOP are already "cut the loss" decisions, not
+        # "wait for a better price" ones — real data from live trading
+        # showed the old behavior (retry up to exit_force_after_skips times
+        # whenever the fresh exit quote's slippage exceeded
+        # exit_max_price_impact_pct, holding the position between retries)
+        # let already-losing, still-falling positions keep falling while
+        # the bot waited for slippage to improve, turning a nominal -5%
+        # stop-loss into realized exits of -16% to -19% in several trades
+        # (e.g. MO -19.42%, MOMMY -16.03%). Waiting for a bad quote to
+        # improve during an active downtrend doesn't work any better than
+        # it does during a rug — see the RUG_PROTECTION case this mirrors —
+        # so these two exit reasons now bypass the retry-and-hold gate the
+        # same way RUG_PROTECTION already did. TAKE_PROFIT keeps the retry
+        # gate: holding a winning position briefly for a cleaner fill is
+        # low-urgency compared to holding a losing one hoping it stops
+        # falling.
+        is_loss_cutting_exit = reason in ("RUG_PROTECTION", "STOP_LOSS", "TIME_STOP")
 
         if (
-            not is_rug_protection
+            not is_loss_cutting_exit
             and abs(exit_impact) > self.config.exit_max_price_impact_pct
             and skip_count < self.config.exit_force_after_skips
         ):
@@ -1624,6 +1641,14 @@ class LiveTrader:
                 f"🚨 RUG PROTECTION {position['symbol']}: catastrophic drop detected "
                 f"({pnl_pct:+.2f}%), selling immediately at best available price "
                 f"(impact={exit_impact:.2f}%), skipping normal slippage retry.",
+                flush=True,
+            )
+        elif is_loss_cutting_exit and abs(exit_impact) > self.config.exit_max_price_impact_pct:
+            print(
+                f"{reason} {position['symbol']}: exit slippage "
+                f"{exit_impact:.2f}% exceeds {self.config.exit_max_price_impact_pct:.2f}%, "
+                f"selling immediately anyway — this is already a loss-cutting exit, "
+                f"waiting for a better quote only risks the loss growing further.",
                 flush=True,
             )
         elif skip_count >= self.config.exit_force_after_skips and abs(exit_impact) > self.config.exit_max_price_impact_pct:
