@@ -105,8 +105,41 @@ class Config:
     # gives a dedicated, non-shared 100 calls/min instead. Optional — if
     # unset, discovery keeps working exactly as before, just rate-limited.
     coingecko_api_key: str = os.getenv("COINGECKO_API_KEY", "").strip()
-    discovery_min_pool_age_minutes: float = 15.0
-    discovery_max_pool_age_minutes: float = 90.0
+    # Strategy change, backed by external data rather than another
+    # parameter guess: Solidus Labs' 2025 rug-pull report found ~98.6% of
+    # Pump.fun tokens show pump-and-dump characteristics, and BeInCrypto's
+    # reporting on sniper wallets found professional snipers exit 85-90%
+    # of their position within the first 1-2 swaps / 5 minutes of a pool's
+    # life, at an 87% win rate — they create the appearance of demand that
+    # draws in later buyers right as they dump. This bot's old 15-90 minute
+    # discovery window sat squarely in that post-snipe dump phase, which
+    # matches what live trading showed: multiple positions (BROOD, OTC)
+    # collapsed within 17-18 seconds of entry, well before any exit logic
+    # could help. No amount of stop-loss/trailing-stop tuning fixes buying
+    # into a dump that already happened before entry. So instead of hunting
+    # brand-new pools, discovery now targets pools old enough to have
+    # survived past that window with real, sustained trading (see
+    # _discover_new_pool_mints, which now queries GeckoTerminal's
+    # trending_pools endpoint instead of new_pools).
+    #
+    # 60 minutes, not longer: a second data point (j.tools' bonding-curve
+    # analysis) put the hardest die-off period at up to 6 hours, which
+    # would be the more conservative choice, but the primary defense here
+    # isn't the age number — it's that trending_pools only returns pools
+    # with real, currently-sustained volume in the first place, which
+    # already excludes tokens that died in that first-hours window
+    # regardless of raw age. 60 minutes is set past the ~5-10 minute
+    # sniper-dump window with real margin, while still leaving enough
+    # trade volume for the bot to actually find candidates — a 6-hour
+    # floor would cut candidate flow far more than the extra safety
+    # margin is worth once trending_pools is already doing the survivor
+    # screening.
+    discovery_min_pool_age_minutes: float = float(
+        os.getenv("DISCOVERY_MIN_POOL_AGE_MINUTES", "60")
+    )
+    discovery_max_pool_age_minutes: float = float(
+        os.getenv("DISCOVERY_MAX_POOL_AGE_MINUTES", "10080")
+    )
     max_open_positions: int = min(int(os.getenv("MAX_OPEN_POSITIONS", "3")), 3)
     max_completed_round_trips: int = int(os.getenv("MAX_COMPLETED_ROUND_TRIPS", "0"))
     # Real-money execution protection: never allow stale env vars to loosen these caps.
@@ -1058,13 +1091,22 @@ class LiveTrader:
         seen: set[str] = set()
         page_errors = 0
 
-        # Confirmed via CoinGecko's own docs (docs.coingecko.com/demo/
-        # reference/latest-pools-network): this is the same on-chain pool
-        # data as api.geckoterminal.com's endpoint, same JSON:API response
-        # shape (attributes.pool_created_at, relationships.base_token.data.id
-        # = "solana_<mint>"), just reachable under CoinGecko's own domain
-        # with an optional Demo API key for a dedicated (non-IP-shared)
-        # rate limit instead of the keyless endpoint's shared one.
+        # Same CoinGecko on-chain API family as before (docs.coingecko.com/
+        # demo/reference/trending-pools-network), same JSON:API pool
+        # resource shape (attributes.pool_created_at, relationships.
+        # base_token.data.id = "solana_<mint>") as the new_pools endpoint
+        # this replaced — GeckoTerminal's "pool" resource is consistent
+        # across all of its pool-listing endpoints. Switched from
+        # new_pools to trending_pools deliberately: new_pools surfaces
+        # brand-new launches, which is exactly the window professional
+        # snipers dump into within the first few minutes (see the
+        # discovery_min/max_pool_age_minutes comment on Config for the
+        # data behind this change) — trending_pools instead surfaces pools
+        # with real, currently-sustained trading activity, which is a
+        # much better proxy for "this survived past the initial dump and
+        # still has genuine volume" than raw age alone. duration=6h asks
+        # for pools trending over a 6-hour window rather than a single
+        # noisy 5-minute spike.
         gecko_headers = (
             {"x-cg-demo-api-key": self.config.coingecko_api_key}
             if self.config.coingecko_api_key
@@ -1073,8 +1115,8 @@ class LiveTrader:
         for page in range(1, self.config.discovery_pages + 1):
             url = (
                 "https://api.coingecko.com/api/v3/onchain/"
-                "networks/solana/new_pools"
-                f"?page={page}&include=base_token"
+                "networks/solana/trending_pools"
+                f"?page={page}&duration=6h&include=base_token"
             )
             try:
                 payload = self.http.json("GET", url, headers=gecko_headers)
@@ -1147,9 +1189,10 @@ class LiveTrader:
         self._discovery_cache = mints
         self._discovery_cache_at = now_mono
         print(
-            f"DISCOVERY V8: {len(mints)} unique Solana new-pool mints "
-            f"from {self.config.discovery_pages} GeckoTerminal pages "
-            f"(page_errors={page_errors})",
+            f"DISCOVERY V9 (trending, age {self.config.discovery_min_pool_age_minutes:.0f}-"
+            f"{self.config.discovery_max_pool_age_minutes:.0f}m): {len(mints)} unique "
+            f"Solana trending-pool mints from {self.config.discovery_pages} "
+            f"GeckoTerminal pages (page_errors={page_errors})",
             flush=True,
         )
         return list(mints)
@@ -1923,7 +1966,7 @@ class LiveTrader:
             flush=True,
         )
         print(
-            f"Discovery V8: GeckoTerminal Solana new_pools, "
+            f"Discovery V9: GeckoTerminal Solana trending_pools (6h), "
             f"pages=1..{self.config.discovery_pages}, "
             f"pool age={self.config.discovery_min_pool_age_minutes:.0f}.."
             f"{self.config.discovery_max_pool_age_minutes:.0f}m, "
