@@ -230,7 +230,15 @@ class Config:
     # guarantee — smart-tagged wallets can still be wrong on any single
     # trade — but it is the only signal here with any track record behind
     # it, unlike raw momentum/liquidity thresholds which have none.
-    min_gmgn_smart_wallets: int = int(os.getenv("MIN_GMGN_SMART_WALLETS", "2"))
+    # Lowered from 2 to 1 after live evidence: for hours after the min=2
+    # gate went live, trade flow nearly stopped, and the dominant rejection
+    # reason in the logs was repeatedly "gmgn_insufficient_smart_money_1_
+    # below_2" — i.e. real, otherwise-qualifying candidates sitting at
+    # exactly 1 smart wallet were being thrown out. min=1 keeps the hard
+    # requirement (a token with ZERO smart-money wallets is still rejected,
+    # which is the actual meaningful bar) while not starving flow over a
+    # single-wallet margin that has no evidence behind it.
+    min_gmgn_smart_wallets: int = int(os.getenv("MIN_GMGN_SMART_WALLETS", "1"))
     # Kept as a secondary tightener even after the hard gate above: among
     # tokens that already cleared min_gmgn_smart_wallets, one that ALSO has
     # a risk ratio past this soft fraction of its hard cap is rejected.
