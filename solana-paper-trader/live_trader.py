@@ -1619,7 +1619,17 @@ class LiveTrader:
         # gate: holding a winning position briefly for a cleaner fill is
         # low-urgency compared to holding a losing one hoping it stops
         # falling.
-        is_loss_cutting_exit = reason in ("RUG_PROTECTION", "STOP_LOSS", "TIME_STOP")
+        # TRAILING_STOP is included too: it fires while a position is
+        # actively giving back gains from its peak, which is the same
+        # "don't wait for a better price during a decline" situation as a
+        # stop-loss, just starting from positive territory instead of
+        # negative.
+        is_loss_cutting_exit = reason in (
+            "RUG_PROTECTION",
+            "STOP_LOSS",
+            "TIME_STOP",
+            "TRAILING_STOP",
+        )
 
         if (
             not is_loss_cutting_exit
@@ -1647,8 +1657,8 @@ class LiveTrader:
             print(
                 f"{reason} {position['symbol']}: exit slippage "
                 f"{exit_impact:.2f}% exceeds {self.config.exit_max_price_impact_pct:.2f}%, "
-                f"selling immediately anyway — this is already a loss-cutting exit, "
-                f"waiting for a better quote only risks the loss growing further.",
+                f"selling immediately anyway — price is actively moving against this "
+                f"position, waiting for a better quote only risks losing more of it.",
                 flush=True,
             )
         elif skip_count >= self.config.exit_force_after_skips and abs(exit_impact) > self.config.exit_max_price_impact_pct:
@@ -1795,6 +1805,32 @@ class LiveTrader:
                     mint,
                     position,
                     "TAKE_PROFIT",
+                    pnl_pct,
+                )
+            elif (
+                peak_pnl_pct >= self.config.trailing_activation_pct
+                and pnl_pct
+                <= max(
+                    peak_pnl_pct - self.config.trailing_distance_pct,
+                    self.config.trailing_floor_pct,
+                )
+            ):
+                # trailing_activation_pct / trailing_distance_pct /
+                # trailing_floor_pct and peak_pnl_pct were already defined
+                # and tracked (see above) but nothing ever read them — a
+                # position that ran up to, say, +15% with no exit condition
+                # for "give some of that back" would just keep being held
+                # until it either hit the full +18% TAKE_PROFIT target or
+                # round-tripped all the way down to the -5% STOP_LOSS,
+                # turning a real gain into a loss. Now: once a position has
+                # ever reached +8% (trailing_activation_pct), its exit
+                # floor trails 4 points (trailing_distance_pct) below its
+                # peak, never below +3% (trailing_floor_pct) once armed —
+                # so a run-up gets locked in instead of given back.
+                self._close_position(
+                    mint,
+                    position,
+                    "TRAILING_STOP",
                     pnl_pct,
                 )
             elif pnl_pct <= self.config.stop_loss_pct:
