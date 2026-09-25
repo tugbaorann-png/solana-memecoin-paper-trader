@@ -82,8 +82,20 @@ class Config:
     # static POSITION_LAMPORTS if the live price lookup ever fails
     # (fail-open, same pattern as every other external check in this bot).
     position_usd: float = float(os.getenv("POSITION_USD", "1.0"))
-    # Fixed live exits requested for this test version.
-    take_profit_pct: float = 18.0
+    # v11 FREQUENCY-FIRST strategy change. The v10 "quality" config (18%
+    # TP, 60min+ discovery age, hard smart-money gate) was deliberately
+    # selective — it traded rarely because most of its candidates got
+    # filtered out. That was the right lever for win-rate, but it's the
+    # wrong lever for trade count, and those two goals pull in opposite
+    # directions: loosening the filters below to get more trades will
+    # also let in more of the low-quality setups v10 was built to reject.
+    # This is a real trade-off, not a bug — expect more trades AND a
+    # noisier per-trade outcome.
+    # TP lowered from 18% to 10%: still clears the ~3.5% round-trip cost
+    # (min_roundtrip_return_pct below) with real margin, but resolves in
+    # fewer/smaller moves so positions turn over faster instead of sitting
+    # open waiting for a large move that may not come.
+    take_profit_pct: float = 10.0
     stop_loss_pct: float = -5.0
     # Rug-pull circuit breaker: if a position's value collapses far beyond
     # the normal stop-loss (dev dumping / liquidity pulled), we bypass the
@@ -149,13 +161,21 @@ class Config:
     # floor would cut candidate flow far more than the extra safety
     # margin is worth once trending_pools is already doing the survivor
     # screening.
+    # Lowered from 60 to 20 minutes for v11: still clear of the ~5-10
+    # minute sniper-dump window with margin, but widens the candidate
+    # pool substantially since trending_pools' survivor screening (real,
+    # currently-sustained volume) does most of the safety work here, not
+    # the raw age cutoff itself.
     discovery_min_pool_age_minutes: float = float(
-        os.getenv("DISCOVERY_MIN_POOL_AGE_MINUTES", "60")
+        os.getenv("DISCOVERY_MIN_POOL_AGE_MINUTES", "20")
     )
     discovery_max_pool_age_minutes: float = float(
         os.getenv("DISCOVERY_MAX_POOL_AGE_MINUTES", "10080")
     )
-    max_open_positions: int = min(int(os.getenv("MAX_OPEN_POSITIONS", "3")), 3)
+    # Raised 3 -> 5 for v11: more concurrent slots means more of the
+    # (now larger) candidate pool actually gets acted on instead of
+    # expiring unfilled while existing positions are still open.
+    max_open_positions: int = min(int(os.getenv("MAX_OPEN_POSITIONS", "5")), 5)
     max_completed_round_trips: int = int(os.getenv("MAX_COMPLETED_ROUND_TRIPS", "0"))
     # Real-money execution protection: never allow stale env vars to loosen these caps.
     max_price_impact_pct: float = min(float(os.getenv("MAX_PRICE_IMPACT_PCT", "1.5")), 1.5)
@@ -166,13 +186,25 @@ class Config:
     exit_max_price_impact_pct: float = 5.0
     exit_force_after_skips: int = 5
     min_roundtrip_return_pct: float = max(float(os.getenv("MIN_ROUNDTRIP_RETURN_PCT", "96.5")), 96.5)
-    reject_cooldown_seconds: int = int(os.getenv("REJECT_COOLDOWN_SECONDS", "60"))
+    # Halved 60 -> 30 for v11: rejected candidates get re-evaluated sooner,
+    # which matters more now that the candidate pool is bigger and faster-
+    # moving (lower discovery age floor above).
+    reject_cooldown_seconds: int = int(os.getenv("REJECT_COOLDOWN_SECONDS", "30"))
     # Entry-quality gate: do not buy every token that merely passes the baseline scanner.
     min_entry_rank: float = float(os.getenv("MIN_ENTRY_RANK", "5"))
     max_entry_rank: float = float(os.getenv("MAX_ENTRY_RANK", "60"))
-    min_entry_buy_pressure_pct: float = float(os.getenv("MIN_ENTRY_BUY_PRESSURE_PCT", "2"))
-    confirmation_seconds: float = float(os.getenv("ENTRY_CONFIRMATION_SECONDS", "15"))
-    min_entry_price_change_5m_pct: float = float(os.getenv("MIN_ENTRY_PRICE_CHANGE_5M_PCT", "1.5"))
+    # Lowered 2 -> 0 for v11: this required buyers to already outnumber
+    # sellers by a visible margin before entry, which is a quality signal
+    # but also a volume killer. 0 still requires buy pressure to be
+    # non-negative (not net selling), just no longer a hard >2% floor.
+    min_entry_buy_pressure_pct: float = float(os.getenv("MIN_ENTRY_BUY_PRESSURE_PCT", "0"))
+    # Shortened 15 -> 8 for v11: less time for a fast-moving candidate to
+    # decay past the entry window while we wait to confirm it.
+    confirmation_seconds: float = float(os.getenv("ENTRY_CONFIRMATION_SECONDS", "8"))
+    # Lowered 1.5 -> 0.5 for v11: this required visible upward momentum in
+    # the last 5 minutes before we'd even consider a token, which cuts out
+    # a lot of candidates that are simply quiet/early rather than dead.
+    min_entry_price_change_5m_pct: float = float(os.getenv("MIN_ENTRY_PRICE_CHANGE_5M_PCT", "0.5"))
     # STRATEGY CHANGE (v10): lowered from 40 to 20. Live log evidence from
     # this bot's own trades (2026-09-24, post smart-money-gate deploy) shows
     # the actual failure mode: FUND and AI were both already -2.2% / -2.4%
@@ -190,10 +222,16 @@ class Config:
     # "buy anything flat") is a direct response to that specific evidence,
     # not a guess.
     max_entry_price_change_5m_pct: float = float(os.getenv("MAX_ENTRY_PRICE_CHANGE_5M_PCT", "20"))
-    trailing_activation_pct: float = 8.0
-    trailing_distance_pct: float = 4.0
-    trailing_floor_pct: float = 3.0
-    max_hold_seconds: float = 600.0
+    # Tightened for v11 to match the lower 10% take-profit above: trailing
+    # stop now locks in gains sooner instead of giving back most of a
+    # smaller target move while waiting for the old 8% activation point.
+    trailing_activation_pct: float = 5.0
+    trailing_distance_pct: float = 3.0
+    trailing_floor_pct: float = 2.0
+    # Halved 600 -> 300 for v11: positions that go nowhere get freed up
+    # twice as fast, so capital cycles into new candidates instead of
+    # sitting idle in a stalled trade for up to 10 minutes.
+    max_hold_seconds: float = 300.0
     # Was a hardcoded 200 — for tokens whose pools are only 15-90 minutes
     # old (our discovery window), reaching 200 unique holders is rare, so
     # this single gate was very likely the main reason trade frequency was
@@ -238,7 +276,19 @@ class Config:
     # requirement (a token with ZERO smart-money wallets is still rejected,
     # which is the actual meaningful bar) while not starving flow over a
     # single-wallet margin that has no evidence behind it.
-    min_gmgn_smart_wallets: int = int(os.getenv("MIN_GMGN_SMART_WALLETS", "1"))
+    # v11 FREQUENCY-FIRST CHANGE — the single biggest lever in this file.
+    # Set to 0, which disables the hard gate entirely (0 smart wallets is
+    # never < 0, so the check in _gmgn_holder_quality_reasons never fires).
+    # Read this honestly: v10's own comment above calls this hard gate
+    # "the single most evidence-backed edge available to a retail bot in
+    # this market". Turning it off does not add a new edge — it removes
+    # the best one this bot had, in exchange for volume. Smart-wallet
+    # presence is still fetched and logged (see GMGN SMART MONEY PRESENT
+    # lines) so it stays visible, it just no longer blocks a buy on its
+    # own. If win rate craters after this change, the smart-money gate
+    # going to 0 is the first thing to revert, not the TP/SL/age knobs
+    # above.
+    min_gmgn_smart_wallets: int = int(os.getenv("MIN_GMGN_SMART_WALLETS", "0"))
     # Kept as a secondary tightener even after the hard gate above: among
     # tokens that already cleared min_gmgn_smart_wallets, one that ALSO has
     # a risk ratio past this soft fraction of its hard cap is rejected.
@@ -1990,7 +2040,9 @@ class LiveTrader:
             flush=True,
         )
         print(
-            "GMGN smart-money layer (v10, HARD gate): "
+            "GMGN smart-money layer (v11, gate "
+            + ("HARD" if self.config.min_gmgn_smart_wallets > 0 else "OFF, logged only")
+            + "): "
             + (
                 f"ACTIVE (min_smart_wallets>={self.config.min_gmgn_smart_wallets}, "
                 f"rat traders<={self.config.max_gmgn_rat_trader_pct:.0f}%, "
@@ -2012,7 +2064,7 @@ class LiveTrader:
             flush=True,
         )
         print(
-            f"Discovery V9: GeckoTerminal Solana trending_pools (6h), "
+            f"Discovery V11 (frequency-first): GeckoTerminal Solana trending_pools (6h), "
             f"pages=1..{self.config.discovery_pages}, "
             f"pool age={self.config.discovery_min_pool_age_minutes:.0f}.."
             f"{self.config.discovery_max_pool_age_minutes:.0f}m, "
