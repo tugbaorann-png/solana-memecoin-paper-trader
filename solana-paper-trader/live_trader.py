@@ -32,6 +32,7 @@ TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 # hours — see _close_token_account, which now reads the account's actual
 # owner program via getAccountInfo instead of assuming legacy Token).
 TOKEN_2022_PROGRAM_ID = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+SYSTEM_PROGRAM_ID = "11111111111111111111111111111111111111111"
 # CAIP-2 chain id Privy expects for Solana mainnet-beta: the first 32 chars
 # of the mainnet genesis hash, per docs.privy.io/wallets/using-wallets/
 # solana/send-a-transaction and the CAIP-2 Solana namespace spec
@@ -60,6 +61,56 @@ def _encode_compact_u16(n: int) -> bytes:
             out.append(elem)
             break
     return bytes(out)
+
+
+def _build_transfer_transaction(
+    from_address: str, to_address: str, lamports: int, recent_blockhash: str
+) -> str:
+    """One-off SOL withdrawal helper (WITHDRAW_ALL_TO env var, see main()).
+    Hand-built, unsigned legacy Solana transaction with a single System
+    Program Transfer instruction (index 2 as u32 LE + 8-byte LE lamports),
+    same wire-format approach as _build_close_account_transaction below.
+    """
+    from_bytes = _base58_decode(from_address)
+    to_bytes = _base58_decode(to_address)
+    program_bytes = _base58_decode(SYSTEM_PROGRAM_ID)
+    blockhash_bytes = _base58_decode(recent_blockhash)
+
+    for name, raw in (
+        ("from address", from_bytes),
+        ("to address", to_bytes),
+        ("system program", program_bytes),
+        ("recent blockhash", blockhash_bytes),
+    ):
+        if len(raw) != 32:
+            raise LiveBotError(f"Decoded {name} is not 32 bytes ({len(raw)})")
+
+    account_keys = [from_bytes, to_bytes, program_bytes]
+    header = bytes([1, 0, 1])
+
+    message = bytearray()
+    message += header
+    message += _encode_compact_u16(len(account_keys))
+    for key in account_keys:
+        message += key
+    message += blockhash_bytes
+
+    instruction_accounts = bytes([0, 1])  # from=index0, to=index1
+    instruction_data = bytes([2, 0, 0, 0]) + lamports.to_bytes(8, "little")
+
+    message += _encode_compact_u16(1)
+    message += bytes([2])  # programIdIndex -> system program
+    message += _encode_compact_u16(len(instruction_accounts))
+    message += instruction_accounts
+    message += _encode_compact_u16(len(instruction_data))
+    message += instruction_data
+
+    transaction = bytearray()
+    transaction += _encode_compact_u16(1)
+    transaction += bytes(64)
+    transaction += message
+
+    return base64.b64encode(bytes(transaction)).decode("ascii")
 
 
 class LiveBotError(RuntimeError):
@@ -2185,6 +2236,84 @@ class _Tee:
             pass
 
 
+def _run_one_off_withdrawal(dest_address: str) -> int:
+    """Triggered by setting WITHDRAW_ALL_TO as a Render env var (no shell
+    needed) -- sends the Privy wallet's SOL balance, minus a fee reserve,
+    to dest_address, then exits WITHOUT starting the trading loop. Meant to
+    be a rare manual action: remove WITHDRAW_ALL_TO afterward and redeploy
+    to resume normal trading.
+    """
+    http = HttpClient()
+    signer = PrivySigner(
+        os.getenv("PRIVY_APP_ID", ""),
+        os.getenv("PRIVY_APP_SECRET", ""),
+        os.getenv("PRIVY_WALLET_ID", ""),
+        http,
+    )
+    wallet = signer.wallet()
+    from_address = str(wallet.get("address", ""))
+    if not from_address:
+        print(f"WITHDRAW ABORTED: could not read wallet address from Privy: {wallet}", flush=True)
+        return 1
+
+    balance_payload = http.json(
+        "POST",
+        SOLANA_RPC_URL,
+        body={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getBalance",
+            "params": [from_address, {"commitment": "confirmed"}],
+        },
+    )
+    balance_result = (balance_payload or {}).get("result")
+    balance_lamports = int(
+        balance_result.get("value") if isinstance(balance_result, dict) else balance_result or 0
+    )
+    reserve_lamports = int(os.getenv("WITHDRAW_RESERVE_LAMPORTS", "2000000"))
+    send_lamports = balance_lamports - reserve_lamports
+
+    print(
+        f"WITHDRAW REQUESTED: from={from_address} to={dest_address} "
+        f"balance={balance_lamports / 1e9:.6f} SOL reserve={reserve_lamports / 1e9:.6f} SOL "
+        f"sending={send_lamports / 1e9:.6f} SOL",
+        flush=True,
+    )
+    if send_lamports <= 0:
+        print("WITHDRAW ABORTED: balance too low to leave the fee reserve. Nothing sent.", flush=True)
+        return 1
+
+    blockhash_payload = http.json(
+        "POST",
+        SOLANA_RPC_URL,
+        body={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getLatestBlockhash",
+            "params": [{"commitment": "finalized"}],
+        },
+    )
+    blockhash_result = (blockhash_payload or {}).get("result") or {}
+    recent_blockhash = str(
+        blockhash_result.get("blockhash")
+        or (blockhash_result.get("value") or {}).get("blockhash")
+        or ""
+    )
+    if not recent_blockhash:
+        print("WITHDRAW ABORTED: could not fetch a recent blockhash.", flush=True)
+        return 1
+
+    unsigned_tx = _build_transfer_transaction(from_address, dest_address, send_lamports, recent_blockhash)
+    signature = signer.sign_and_send_transaction(unsigned_tx)
+    print(f"WITHDRAW SENT: signature={signature} https://solscan.io/tx/{signature}", flush=True)
+    print(
+        "Remove the WITHDRAW_ALL_TO env var now (Render -> Environment) and redeploy "
+        "to resume normal trading -- otherwise the next restart will try to withdraw again.",
+        flush=True,
+    )
+    return 0
+
+
 def main() -> int:
     config = Config()
 
@@ -2197,6 +2326,14 @@ def main() -> int:
         print(f"[LOGGING] mirroring console output to {log_path}", flush=True)
     except OSError as error:
         print(f"[LOGGING] could not open log file {log_path}: {error}", flush=True)
+
+    # Manual one-off SOL withdrawal path -- set WITHDRAW_ALL_TO=<phantom
+    # address> as a Render env var (Environment tab, no shell needed) and
+    # redeploy. Runs once, sends the wallet balance minus a fee reserve,
+    # then exits without starting the trading loop at all.
+    withdraw_to = os.getenv("WITHDRAW_ALL_TO", "").strip()
+    if withdraw_to:
+        return _run_one_off_withdrawal(withdraw_to)
 
     if config.position_lamports <= 0 or config.reserve_lamports < 0:
         raise SystemExit("Invalid position/reserve configuration")
