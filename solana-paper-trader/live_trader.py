@@ -32,7 +32,7 @@ TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 # hours — see _close_token_account, which now reads the account's actual
 # owner program via getAccountInfo instead of assuming legacy Token).
 TOKEN_2022_PROGRAM_ID = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
-SYSTEM_PROGRAM_ID = "11111111111111111111111111111111111111111"
+SYSTEM_PROGRAM_ID = "11111111111111111111111111111111"
 # CAIP-2 chain id Privy expects for Solana mainnet-beta: the first 32 chars
 # of the mainnet genesis hash, per docs.privy.io/wallets/using-wallets/
 # solana/send-a-transaction and the CAIP-2 Solana namespace spec
